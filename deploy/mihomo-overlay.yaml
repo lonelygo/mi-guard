@@ -1,0 +1,21 @@
+# 合并条目到正在使用的 Mihomo 配置的同名列表中。
+# 测速组仅供本地监听使用。业务 rules、代理组和 dialer-proxy 不应引用它。
+proxy-groups:
+  - name: mi-guard-bench
+    type: select
+    hidden: true
+    use:
+      - vipuser_trojan
+      - vipuser_reality
+
+listeners:
+  - name: mi-guard-bench-in
+    type: mixed
+    listen: 127.0.0.1
+    port: 17987
+    proxy: mi-guard-bench
+  - name: mi-guard-us-exit
+    type: mixed
+    listen: 127.0.0.1
+    port: 7898
+    proxy: ⛓️‍💥 US-WARP

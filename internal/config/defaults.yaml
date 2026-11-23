@@ -1,0 +1,62 @@
+# mihomo-guard.yaml — 下载速率使用 Mbps，流量上限使用字节。
+mihomo:
+  controller: http://127.0.0.1:9090
+  secret: ""                    # 留空时读取下方 Mihomo 配置中的 secret
+  config_path: ~/.config/clash.meta/mihomo-2026.yaml
+  stable_binary: ~/Library/Application Support/com.metacubex.ClashX.meta/.private_core/com.metacubex.ClashX.ProxyConfigHelper.meta
+  allow_prerelease: false       # 临时订阅模式默认要求正式版本
+  test_group: mi-guard-bench
+  test_proxy: http://127.0.0.1:17987
+
+schedule:
+  heartbeat_interval: 30s
+  heartbeat_timeout: 3s
+  heartbeat_failures: 2
+  full_interval: 12h
+  active_interval: 2h           # 0s 关闭快速抽查
+  recheck_delay: 1m
+  cooldown: 5m
+  geo_interval: 5m
+
+speedtest:
+  url: https://speed.cloudflare.com/__down
+  liveness_url: https://www.gstatic.com/generate_204
+  geo_url: https://www.google.com/searchdomaincheck?format=domain
+  trace_url: https://www.cloudflare.com/cdn-cgi/trace
+  timeout: 8s
+  streams_per_node: 1          # 可设 1–8；多流平分一次测速的总额度
+  sweep_bytes: 4194304
+  quick_bytes: 1048576
+  confirm_bytes: 8388608
+  monthly_bytes: 6442450944
+  billing_day: 1               # 每月账期起始日，1 到 28
+
+selection:
+  severe_drop_pct: 20          # 正常基准 100，当前 <= 80 进入确认
+  near_best_pct: 20            # 本轮最佳 100，当前 >= 80 进入同档比较
+  slow_confirmations: 2
+  sync_direct_on_warp_switch: true
+  max_sample_age: 36h
+
+history:
+  file: speed-history.json     # 相对于本配置文件
+  samples_per_node: 50
+
+notifications:
+  enabled: true
+  summary: true
+  switch: true
+  helper: auto                  # Homebrew、源码 build 和 make install 布局自动解析；也可指定路径
+
+groups:
+  - name: 🔞 WARP-US
+    chain: ⛓️‍💥 US-WARP
+    direct: 🇺🇲 美国节点
+    geo_proxy: http://127.0.0.1:7898
+    expected_geo: .google.com
+    strict_geo: false
+    exclude_regex: ""           # 以控制器 all 为准，可按需额外排除节点
+  - name: 🔞 WARP-SG
+    chain: ⛓️‍💥 SG-WARP
+    direct: 🇸🇬 狮城节点
+    exclude_regex: ""

@@ -1,0 +1,83 @@
+class MiGuard < Formula
+  desc "Bandwidth-aware Mihomo route guard for macOS"
+  homepage "https://github.com/lonelygo/mi-guard"
+  license "GPL-3.0-only"
+
+  # BEGIN HOMEBREW_STABLE_METADATA
+  # END HOMEBREW_STABLE_METADATA
+
+  head do
+    url "https://github.com/lonelygo/mi-guard.git", branch: "main"
+
+    depends_on "go" => :build
+    uses_from_macos "swift" => :build
+  end
+
+  depends_on macos: :monterey
+
+  deny_network_access!
+
+  def fetch
+    return unless build.head?
+
+    system "go", "mod", "download"
+  end
+
+  def install
+    if build.head?
+      system "make", "cli", "app"
+
+      bin.install "build/mihomo-guard"
+      libexec.install "build/mi-guard.app"
+      pkgshare.install "deploy/mihomo-overlay.yaml"
+    else
+      bin.install "bin/mihomo-guard"
+      libexec.install "libexec/mi-guard.app"
+      pkgshare.install "share/mi-guard/mihomo-overlay.yaml"
+    end
+  end
+
+  def caveats
+    <<~EOS
+      Run `mihomo-guard init` on first use, or reuse your existing
+      ~/.config/mihomo-guard/mihomo-guard.yaml.
+
+      Merge the proxy-groups and listeners in the following file into your
+      active Mihomo configuration, then reload Mihomo.
+        #{opt_pkgshare}/mihomo-overlay.yaml
+
+      Check the routing and grant notification permission in your login session.
+        mihomo-guard check
+        mihomo-guard notify-setup
+
+      Start the service as your login user. Logs go to ~/Library/Logs/mihomo-guard.log.
+    EOS
+  end
+
+  service do
+    run [opt_bin/"mihomo-guard", "daemon", "-c", "#{Dir.home}/.config/mihomo-guard/mihomo-guard.yaml"]
+    environment_variables HOME: Dir.home, PATH: std_service_path_env
+    working_dir Dir.home
+    keep_alive true
+    throttle_interval 30
+    process_type :background
+    log_path "#{Dir.home}/Library/Logs/mihomo-guard.log"
+    error_log_path "#{Dir.home}/Library/Logs/mihomo-guard.log"
+  end
+
+  test do
+    assert_match "mihomo-guard <command>", shell_output("#{bin}/mihomo-guard --help")
+
+    config = testpath/"mihomo-guard.yaml"
+    system bin/"mihomo-guard", "init", "-c", config
+    assert_match "helper: auto", config.read
+
+    overlay = pkgshare/"mihomo-overlay.yaml"
+    assert_match "mi-guard-bench", overlay.read
+
+    app = libexec/"mi-guard.app"
+    assert_predicate app/"Contents/MacOS/mi-guard-notify", :executable?
+    assert_path_exists app/"Contents/Resources/AppIcon.icns"
+    system "/usr/bin/codesign", "--verify", "--deep", "--strict", app
+  end
+end
