@@ -4,6 +4,12 @@ class MiGuard < Formula
   license "GPL-3.0-only"
 
   # BEGIN HOMEBREW_STABLE_METADATA
+  stable do
+    url "https://github.com/lonelygo/mi-guard/releases/download/v0.1.0/mi-guard-0.1.0-darwin-arm64.tar.gz"
+    version "0.1.0"
+    sha256 "954e22c37e43ca08ff9ca94e94573be8ec5da7693d74a19da67e920f4f5962d4"
+    depends_on arch: :arm64
+  end
   # END HOMEBREW_STABLE_METADATA
 
   head do
