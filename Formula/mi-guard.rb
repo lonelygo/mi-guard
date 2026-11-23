@@ -55,6 +55,8 @@ class MiGuard < Formula
     <<~EOS
       Run `mihomo-guard init` on first use, or reuse your existing
       ~/.config/mihomo-guard/mihomo-guard.yaml.
+      Set mihomo.config_path and group names to match your Mihomo setup.
+      Set mihomo.stable_binary when using `bench --source`.
       Read the defaults and examples for this version in
         #{opt_pkgshare}/mihomo-guard-default.yaml
 

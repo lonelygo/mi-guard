@@ -4,7 +4,7 @@ AGENTDIR ?= $(HOME)/Library/LaunchAgents
 SHAREDIR ?= $(BINDIR)/../share/mi-guard
 GUARD_CONFIG ?= $(HOME)/.config/mihomo-guard/mihomo-guard.yaml
 GUARD_LOG ?= $(HOME)/Library/Logs/mihomo-guard.log
-STABLE_CORE ?= $(HOME)/Library/Application Support/com.metacubex.ClashX.meta/.private_core/com.metacubex.ClashX.ProxyConfigHelper.meta
+STABLE_CORE ?= $(shell command -v mihomo)
 BUILD_DIR ?= build
 MACOSX_DEPLOYMENT_TARGET ?= 12.0
 RELEASE_GO_TOOLCHAIN ?= go1.26.11
@@ -15,7 +15,7 @@ build: cli
 
 cli:
 	mkdir -p "$(BUILD_DIR)"
-	MACOSX_DEPLOYMENT_TARGET="$(MACOSX_DEPLOYMENT_TARGET)" go build -trimpath -o "$(BUILD_DIR)/mihomo-guard" ./cmd/mihomo-guard
+	MACOSX_DEPLOYMENT_TARGET="$(MACOSX_DEPLOYMENT_TARGET)" go build -trimpath -ldflags "-X main.releaseVersion=$(RELEASE_VERSION)" -o "$(BUILD_DIR)/mihomo-guard" ./cmd/mihomo-guard
 
 test:
 	go test -race ./...
@@ -58,4 +58,5 @@ package:
 	GOTOOLCHAIN="$(RELEASE_GO_TOOLCHAIN)" python3 deploy/macos/package.py --version "$(VERSION)" --deployment-target "$(MACOSX_DEPLOYMENT_TARGET)"
 
 smoke: build
+	@test -n "$(STABLE_CORE)" || { echo 'Set STABLE_CORE to your Mihomo executable, e.g. make smoke STABLE_CORE=/path/to/mihomo' >&2; exit 1; }
 	python3 tests/live_core_smoke.py --core "$(STABLE_CORE)" --guard "$(CURDIR)/$(BUILD_DIR)/mihomo-guard"

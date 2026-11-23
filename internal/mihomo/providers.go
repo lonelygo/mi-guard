@@ -15,15 +15,39 @@ type responseError struct {
 }
 
 func (e *responseError) Error() string { return e.message }
+
 func statusIs(err error, code int) bool {
 	var e *responseError
 	return errors.As(err, &e) && e.status == code
 }
 
-// ProbeUnavailable identifies an actual URL-test timeout or negative result
-// returned by Mihomo, as distinct from a missing node or controller outage.
-func ProbeUnavailable(err error) bool {
-	return statusIs(err, http.StatusServiceUnavailable) || statusIs(err, http.StatusGatewayTimeout)
+type probeError struct {
+	status int
+	cause  error
+}
+
+func (e *probeError) Error() string { return e.cause.Error() }
+func (e *probeError) Unwrap() error { return e.cause }
+
+func asProbeError(err error) error {
+	var response *responseError
+	if !errors.As(err, &response) {
+		return err
+	}
+	if response.status != http.StatusServiceUnavailable && response.status != http.StatusGatewayTimeout {
+		return err
+	}
+	return &probeError{status: response.status, cause: err}
+}
+
+// ProbeStatus returns the HTTP status of an unavailable URL-test endpoint.
+// Controller failures from discovery or other API operations are not probes.
+func ProbeStatus(err error) (int, bool) {
+	var probe *probeError
+	if !errors.As(err, &probe) {
+		return 0, false
+	}
+	return probe.status, true
 }
 
 // /proxies exposes global names. Provider leaves also appear in a selector's
@@ -64,10 +88,10 @@ func (c *Client) providerNode(ctx context.Context, name string) (model.Proxy, er
 	}
 	p, ok := leaves[name]
 	if !ok {
-		return p, fmt.Errorf("unknown proxy %q", name)
+		return p, fmt.Errorf("unknown proxy %s", model.QuoteName(name))
 	}
 	if p.Type == "Ambiguous" {
-		return p, fmt.Errorf("multiple provider nodes named %q; use distinct provider prefixes", name)
+		return p, fmt.Errorf("multiple provider nodes named %s; use distinct provider prefixes", model.QuoteName(name))
 	}
 	return p, nil
 }

@@ -66,21 +66,21 @@ func (r *Runner) Candidates(ctx context.Context, group string) ([]string, error)
 	g, managed := r.Managed(group)
 	target, ok := all[group]
 	if !ok {
-		return nil, fmt.Errorf("unknown proxy group %q", group)
+		return nil, fmt.Errorf("unknown proxy group %s", model.QuoteName(group))
 	}
 	if target.All == nil {
-		return nil, fmt.Errorf("proxy %q has no candidates", group)
+		return nil, fmt.Errorf("proxy %s has no candidates", model.QuoteName(group))
 	}
 	if managed && target.Type != "Selector" {
-		return nil, fmt.Errorf("%q is %s, want Selector", group, target.Type)
+		return nil, fmt.Errorf("%s is %s, want Selector", model.QuoteName(group), target.Type)
 	}
 	bench, ok := all[r.Cfg.Mihomo.TestGroup]
 	if !ok || bench.Type != "Selector" {
-		return nil, fmt.Errorf("load the dedicated Mihomo selector %q first", r.Cfg.Mihomo.TestGroup)
+		return nil, fmt.Errorf("load the dedicated Mihomo selector %s first", model.QuoteName(r.Cfg.Mihomo.TestGroup))
 	}
 	for name, p := range all {
 		if p.Dialer == bench.Name || (name != "GLOBAL" && name != bench.Name && slices.Contains(p.All, bench.Name)) {
-			return nil, fmt.Errorf("live %q consumes dedicated bench selector %q", name, bench.Name)
+			return nil, fmt.Errorf("live %s consumes dedicated bench selector %s", model.QuoteName(name), model.QuoteName(bench.Name))
 		}
 	}
 	allowed := make(map[string]bool, len(bench.All))
@@ -117,7 +117,7 @@ func (r *Runner) Candidates(ctx context.Context, group string) ([]string, error)
 		visit(member)
 	}
 	if len(names) == 0 {
-		return nil, fmt.Errorf("no eligible physical members of %q in %q", group, bench.Name)
+		return nil, fmt.Errorf("no eligible physical members of %s in %s", model.QuoteName(group), model.QuoteName(bench.Name))
 	}
 	return names, nil
 }
@@ -129,7 +129,7 @@ func (r *Runner) Measure(ctx context.Context, node, kind string, limit int64) (s
 			return err
 		}
 		if !physical(p) {
-			return fmt.Errorf("%q is not a physical proxy", node)
+			return fmt.Errorf("%s is not a physical proxy", model.QuoteName(node))
 		}
 		group := r.Cfg.Mihomo.TestGroup
 		before, err := r.Core.Proxy(ctx, group)
@@ -137,7 +137,7 @@ func (r *Runner) Measure(ctx context.Context, node, kind string, limit int64) (s
 			return err
 		}
 		if before.Type != "Selector" || !slices.Contains(before.All, node) {
-			return fmt.Errorf("%q is not an available member of test selector %q", node, group)
+			return fmt.Errorf("%s is not an available member of test selector %s", model.QuoteName(node), model.QuoteName(group))
 		}
 		if before.Now != node {
 			defer func() {
@@ -186,11 +186,12 @@ func (r *Runner) Measure(ctx context.Context, node, kind string, limit int64) (s
 		}
 		s.LatencyMS, err = r.Core.Delay(ctx, node, r.Cfg.Speed.LivenessURL, r.Cfg.Schedule.HeartbeatTimeout)
 		if err != nil {
-			if !mihomo.ProbeUnavailable(err) {
+			status, unavailable := mihomo.ProbeStatus(err)
+			if !unavailable {
 				return err
 			}
 			s.Failures = 1
-			s.Error = fmt.Sprintf("204 probe failed, download skipped: %v", err)
+			s.Error = fmt.Sprintf("204 probe: HTTP %d", status)
 			attributed = true
 			return nil
 		}

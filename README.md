@@ -2,7 +2,7 @@
 
 <img src="https://raw.githubusercontent.com/lonelygo/mi-guard/main/deploy/macos/AppIcon.png" width="96" height="96" alt="mi-guard 通知助手图标">
 
-`mihomo-guard` 是运行在 macOS 上的带宽选线守护进程。默认配置为 US 和 SG 两条 WARP 链维护前置节点。也可以让它直接管理普通的手动选择组，在当前线路持续降速或断线时为该组选线。手动 `bench` 可临时测试其他地区或新的机场订阅。
+`mihomo-guard` 是运行在 macOS 上的带宽选线守护进程。它可以为链式代理选择前置节点，也可以直接管理普通的手动选择组，在当前线路持续降速或断线时换线。手动 `bench` 可临时测试其他地区或新的机场订阅。
 
 ## 通过 Homebrew 安装
 
@@ -16,6 +16,10 @@ mihomo-guard init    # 首次使用时创建配置，已有配置可直接沿用
 
 Homebrew 把 `mihomo-guard` 链接到自己的 `bin`，同一版本的通知助手随包安装在 `$(brew --prefix mi-guard)/libexec/mi-guard.app`。默认的 `notifications.helper: auto` 会找到这个助手。已有 `make install` 安装的用户请参考下文的迁移说明。
 
+用 `mihomo-guard -v` 或 `--version` 查看版本，用 `mihomo-guard -h` 或 `--help` 查看命令列表。运行 `mihomo-guard bench --help` 可查看测速参数。
+
+喜欢短命令可以在自己的 `~/.zshrc` 中加入 `alias mig=mihomo-guard`，打开新终端后即可使用 `mig bench --help`。macOS 的 `/usr/bin/mig` 是 Mach Interface Generator，启用别名后仍可用这个完整路径调用它。
+
 也可以从发布页下载 Apple Silicon 的 `.tar.gz` 和 `SHA256SUMS`，在下载目录运行 `shasum -a 256 -c SHA256SUMS`。解包后保留目录结构，运行包内的 `bin/mihomo-guard` 即可找到配套助手。[下载发布包](https://github.com/lonelygo/mi-guard/releases/latest)
 
 ## 配置 guard 和接入 Mihomo
@@ -23,7 +27,7 @@ Homebrew 把 `mihomo-guard` 链接到自己的 `bin`，同一版本的通知助�
 | 文件 | 用法 |
 | --- | --- |
 | `~/.config/mihomo-guard/mihomo-guard.yaml` | 你实际编辑的 guard 配置。首次用 `mihomo-guard init` 创建，已有文件会保留。Homebrew 登录服务读取此路径，命令行可用 `-c /path/to/guard.yaml` 指定其他文件。 |
-| [share/mi-guard/mihomo-guard-default.yaml](share/mi-guard/mihomo-guard-default.yaml) | 当前版本的完整默认值、单位、字段说明和 HK/TW 配置示例。内容与该版本 `init` 生成的文件逐字节相同。升级后可用它对照自己的配置。 |
+| [share/mi-guard/mihomo-guard-default.yaml](share/mi-guard/mihomo-guard-default.yaml) | 当前版本的完整默认值、单位、字段说明和额外组示例。内容与该版本 `init` 生成的文件逐字节相同。升级后可用它对照自己的配置。 |
 | [share/mi-guard/mihomo-overlay.yaml](share/mi-guard/mihomo-overlay.yaml) | Mihomo 的接线示例。将其中的条目手动并入生效的 Mihomo 配置，再重新加载。 |
 
 从 v0.1.1 起，源码仓库和解压后的发布包都在顶层的 `share/mi-guard/` 提供这两份 YAML。`make install` 默认将它们复制到 `~/.local/share/mi-guard/`。Homebrew 用户可以用以下命令查看。
@@ -33,9 +37,15 @@ less "$(brew --prefix mi-guard)/share/mi-guard/mihomo-guard-default.yaml"
 cat  "$(brew --prefix mi-guard)/share/mi-guard/mihomo-overlay.yaml"
 ```
 
-在 guard 配置中，`mihomo.config_path` 指向正在使用的 Mihomo 主配置，`mihomo.stable_binary` 指向 `bench --source` 启动的独立内核。在线守护连接 `mihomo.controller` 指定的现有内核。文件路径支持 `~/`，相对路径以 guard 配置所在目录为基准。
+初次 `init` 后，将 `mihomo.config_path` 改为正在使用的 Mihomo 主配置路径，按实际组名填写 `groups`。使用 `bench --source` 时，还需将 `mihomo.stable_binary` 指向可执行的 Mihomo 内核。在线守护连接 `mihomo.controller` 指定的现有内核。文件路径支持 `~/`，相对路径以 guard 配置所在目录为基准。
 
-在 **Mihomo 主配置**中，把接线示例的策略组和监听器分别加入现有的 `proxy-groups`、`listeners` 列表，并将 `use` 改为实际的 provider 名称。若主配置由订阅工具生成，请把这些条目维护在工具的持久覆写配置里。默认测速监听为 `127.0.0.1:17987`，测速组专供该监听器使用。第二个监听 `127.0.0.1:7898` 用于 US 的地区校验，仅已配置 `geo_proxy` 的组需要对应的出口监听。
+以第一组为例，`name: primary-group-1` 指向 guard 可写的前置选择组。Mihomo 中名为 `dialer-proxy-1` 的链节点通过 `dialer-proxy: primary-group-1` 使用这个组。可选的 `direct-group-1` 会跟随选择同名节点，只管理前置时将 `direct` 留空。
+
+在 **Mihomo 主配置**中，把接线示例的策略组和监听器分别加入现有的 `proxy-groups`、`listeners` 列表，并将 `proxy-providers-1` / `proxy-providers-2` 改为实际的 provider 名称。若主配置由订阅工具生成，请把这些条目维护在工具的持久覆写配置里。默认测速监听为 `127.0.0.1:17987`，测速组 `mi-guard-bench` 专供该监听器使用。
+
+示例中的 `127.0.0.1:7898` 绑定链节点 `dialer-proxy-1`，用于检查这条链的出口地区。启用地区校验时，在对应 guard 组中填写 `geo_proxy` 和 `expected_geo`，并让 Mihomo 加载这个监听。关闭地区校验时，将两个字段同时留空。
+
+从 v0.1.1 升级时，可以直接沿用已初始化的配置。手写精简配置如果曾省略路径或组名，请把实际值补入文件。
 
 ```sh
 mihomo-guard status
@@ -44,25 +54,27 @@ mihomo-guard check
 
 `check` 核对生效的监听绑定、纳管组、链式前置引用和测速路径。`status` 显示当前组选择、账期用量及样本数，`status --probe` 还会检查实际链路或选择组，并显示已启用的地区校验结果。
 
-### 增加地区或只管理一个手动选择组
+地区监听报 `connection refused` 时，核对运行中 Mihomo 实际加载的监听地址和端口。`GET /connections` 超时表示 guard 在本轮时限内未能通过控制器的连接表确认测速路径，相关时限由 `speedtest.timeout` 设置。`bench` 表格中的 `204 probe: HTTP 504` 表示节点健康检查超时，该节点本轮跳过下载。
 
-在 guard 的现有 `groups:` 列表追加条目，名称使用 Mihomo 中的完整名称。下面的 HK 条目管理链式前置，TW 条目只切换指定的 `type: select` 组。候选节点需要同时属于该组和专用测速组。
+### 增加链或只管理一个手动选择组
+
+在 guard 的现有 `groups:` 列表追加条目，名称使用 Mihomo 中的完整名称。下面的第三个条目管理链式前置，最后一个条目只切换指定的 `type: select` 组。候选节点需要同时属于该组和专用测速组。
 
 ```yaml
-  - name: "🔞 WARP-HK"
+  - name: primary-group-3
     mode: chain
-    chain: "⛓️‍💥 HK-WARP"
-  - name: "🇹🇼 台湾节点"
+    chain: dialer-proxy-3
+  - name: optional-selector-group
     mode: selector
 ```
 
-`groups` 按整个列表替换默认值。希望继续管理 US、SG 时保留原有两项。v0.1.0 配置省略 `mode` 时仍按 `chain` 处理。若今后只想管理原来的 `🇺🇲 美国节点`，可将整个 US 条目换成 `name: "🇺🇲 美国节点"` 和 `mode: selector`。新增的普通组可以先用 `mihomo-guard bench -g '🇹🇼 台湾节点'` 只看测速结果，再用同一命令加 `--apply` 应用选择。
+`groups` 按整个列表替换默认值。希望继续管理两个默认示例时保留原有两项。v0.1.0 配置省略 `mode` 时仍按 `chain` 处理。若今后只想管理 `direct-group-1`，可将整个第一项换成 `name: direct-group-1` 和 `mode: selector`。新增的普通组可以先用 `mihomo-guard bench -g optional-selector-group` 只看测速结果，再用同一命令加 `--apply` 应用选择。
 
 ## 手动测速
 
 ```sh
-# 只测狮城候选，打印实际下载 Mbps、HTTP 探测延迟、失败次数及计费字节
-mihomo-guard bench -g '🔞 WARP-SG'
+# 只测第二组候选，打印实际下载 Mbps、HTTP 探测延迟、失败次数及计费字节
+mihomo-guard bench -g primary-group-2
 
 # 临时测试任意已加载策略组；或按生效节点名、名字正则选择
 mihomo-guard bench -g '日本节点'
@@ -72,16 +84,16 @@ mihomo-guard bench --filter '日本|Japan|JP'
 mihomo-guard bench --filter 'JP' --bytes 4194304 --streams 4
 
 # 临时读取一个未加载到在线内核的 provider 文件或订阅 URL
-mihomo-guard bench --source /path/to/provider.yaml -f 'JP|SG'
+mihomo-guard bench --source path_to_your_provider.yaml -f 'JP|SG'
 mihomo-guard bench --source 'https://example.org/subscription' --filter 'US'
 
-# 主动把结果应用到一个已纳管的 WARP 前置组
-mihomo-guard bench -g '🔞 WARP-US' --apply
+# 主动把结果应用到一个已纳管的链式前置组
+mihomo-guard bench -g primary-group-1 --apply
 ```
 
 无参数的 `bench` 测 `groups` 中的所有纳管组。在线模式从独立测速组可达的物理成员中选取候选，可以在接线示例的 `use` 列表加入其他已加载的 provider。每次只选一个测速节点，下载后恢复测速组原选择。每条下载连接在发出请求前，都通过运行中内核的连接表核对实际 selector 和节点，接线错误会中止本轮。默认只输出结果、保存历史及计费，显式 `--apply` 会执行业务组切换。手动指定地区、节点或正则时使用自己的实际名称。
 
-`--source` 接受带顶层 `proxies` 列表的 Mihomo YAML，可重复使用。它用配置中的 `stable_binary` 启动临时核心，默认路径为 `~/Library/Application Support/com.metacubex.ClashX.meta/.private_core/com.metacubex.ClashX.ProxyConfigHelper.meta`。临时核心关闭 TUN，通过临时回环监听和独立 selector 串行测速，退出后回收进程和临时文件。独立模式会核对启动后的版本，默认要求正式版。需要试验 alpha 时可显式设置 `mihomo.allow_prerelease: true`。两个模式共享同一个 guard 配置的账期预算。若系统级 TUN 接管其他进程流量，使用独立实例测试前应确认该核心进程到机场服务器的连接直出，或采用在线测速组。
+`--source` 接受带顶层 `proxies` 列表的 Mihomo YAML，可重复使用。它用配置中 `stable_binary` 指定的 Mihomo 启动临时核心。临时核心关闭 TUN，通过临时回环监听和独立 selector 串行测速，退出后回收进程和临时文件。独立模式会核对启动后的版本，默认要求正式版。需要试验 alpha 时可显式设置 `mihomo.allow_prerelease: true`。两个模式共享同一个 guard 配置的账期预算。若系统级 TUN 接管其他进程流量，使用独立实例测试前应确认该核心进程到机场服务器的连接直出，或采用在线测速组。
 
 ## 自动选线
 
@@ -101,7 +113,7 @@ mihomo-guard bench -g '🔞 WARP-US' --apply
 
 同档候选比较应用层探测失败比例和历史低分位带宽，平手时优先留用原节点。历史记录含探测次数，HTTP 请求失败率用于描述线路可用性。每个周期 16 个节点各读满 4 MiB，每天两轮，30 天共 3.75 GiB 下载响应体。单节点默认单流，可用 `speedtest.streams_per_node` 配置 1～8 流，所有流平分节点总额度。协议开销和机场计费倍率另计。守护进程与手动命令共用配置和历史文件，互斥访问测速组、原子更新 JSON，进程异常退出时预留字节暂按已用处理。
 
-切换时先调整 `🔞 WARP-US` / `🔞 WARP-SG`，再验证相应 WARP 链。US 可按预期 Google 地区顺位尝试。验证成功后，在候选仍属于同地区直出组的前提下，尽力同步 `🇺🇲 美国节点` / `🇸🇬 狮城节点`。直出跟随失败只影响直出组。守护进程会接纳手动选线，并在换线前重新读取当前选择。
+切换时先调整 `primary-group-1` / `primary-group-2`，再验证相应的 `dialer-proxy-1` / `dialer-proxy-2` 链。第一组可按预期 Google 地区顺位尝试。验证成功后，在候选仍属于直出组的前提下，尽力同步 `direct-group-1` / `direct-group-2`。直出跟随失败只影响直出组。守护进程会接纳手动选线，并在换线前重新读取当前选择。
 
 ## 登录时运行与系统通知
 

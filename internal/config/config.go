@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/lonelygo/mi-guard/internal/model"
 	"github.com/lonelygo/mi-guard/share"
 	"gopkg.in/yaml.v2"
 )
@@ -126,21 +127,21 @@ func (c Config) validate() error {
 		switch g.Mode {
 		case "", GroupModeChain:
 			if g.Chain == "" {
-				return fmt.Errorf("group %q needs chain in chain mode (use mode: selector for a standalone select group)", g.Name)
+				return fmt.Errorf("group %s needs chain in chain mode (use mode: selector for a standalone select group)", model.QuoteName(g.Name))
 			}
 		case GroupModeSelector:
 			if g.Chain != "" || g.Direct != "" {
-				return fmt.Errorf("group %q in selector mode must omit chain and direct", g.Name)
+				return fmt.Errorf("group %s in selector mode must omit chain and direct", model.QuoteName(g.Name))
 			}
 		default:
-			return fmt.Errorf("group %q has unknown mode %q (want chain or selector)", g.Name, g.Mode)
+			return fmt.Errorf("group %s has unknown mode %q (want chain or selector)", model.QuoteName(g.Name), g.Mode)
 		}
 		for _, name := range []string{g.Name, g.Chain, g.Direct} {
 			if name == "" {
 				continue
 			}
 			if roles[name] {
-				return fmt.Errorf("duplicate group, chain or test target %q", name)
+				return fmt.Errorf("duplicate group, chain or test target %s", model.QuoteName(name))
 			}
 			roles[name] = true
 		}

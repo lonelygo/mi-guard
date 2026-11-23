@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/lonelygo/mi-guard/internal/model"
 )
 
 const defaultRouteTimeout = 3 * time.Second
@@ -88,7 +90,11 @@ func (c *Client) VerifyRoute(ctx context.Context, conn net.Conn, expected ...str
 			}
 			for _, name := range expected {
 				if !slices.Contains(candidate.Chains, name) {
-					return fmt.Errorf("live tunnel %d used chains %q, missing %q", local.Port, candidate.Chains, name)
+					quoted := make([]string, len(candidate.Chains))
+					for i, chain := range candidate.Chains {
+						quoted[i] = model.QuoteName(chain)
+					}
+					return fmt.Errorf("live tunnel %d used chains [%s], missing %s", local.Port, strings.Join(quoted, ", "), model.QuoteName(name))
 				}
 			}
 			return nil

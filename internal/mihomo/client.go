@@ -118,7 +118,7 @@ func (c *Client) Delay(ctx context.Context, name, testURL string, timeout time.D
 	path := "/proxies/" + url.PathEscape(name) + "/delay?" + query.Encode()
 	if err := c.json(ctx, http.MethodGet, path, nil, &response); err != nil {
 		if !statusIs(err, http.StatusNotFound) {
-			return 0, err
+			return 0, asProbeError(err)
 		}
 		p, lookupErr := c.providerNode(ctx, name)
 		if lookupErr != nil {
@@ -126,7 +126,7 @@ func (c *Client) Delay(ctx context.Context, name, testURL string, timeout time.D
 		}
 		path = "/providers/proxies/" + url.PathEscape(p.Provider) + "/" + url.PathEscape(name) + "/healthcheck?" + query.Encode()
 		if err = c.json(ctx, http.MethodGet, path, nil, &response); err != nil {
-			return 0, err
+			return 0, asProbeError(err)
 		}
 	}
 	if response.Delay == nil || *response.Delay < 0 {

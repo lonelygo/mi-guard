@@ -1,7 +1,23 @@
 // Package model defines controller data and measurements shared by the guard.
 package model
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
+
+// QuoteName keeps emoji joined on screen while escaping quotes, controls and
+// literal backslashes in a Mihomo name.
+func QuoteName(name string) string {
+	const joiner = "\u200d"
+	parts := strings.Split(name, joiner)
+	for i, part := range parts {
+		quoted := strconv.Quote(part)
+		parts[i] = quoted[1 : len(quoted)-1]
+	}
+	return `"` + strings.Join(parts, joiner) + `"`
+}
 
 type Proxy struct {
 	Name     string   `json:"name"`

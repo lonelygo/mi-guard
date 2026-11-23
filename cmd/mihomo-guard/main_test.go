@@ -22,6 +22,44 @@ import (
 	"github.com/lonelygo/mi-guard/internal/model"
 )
 
+func TestHelpAndVersionWithoutConfiguration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"-v"}, []string{"mihomo-guard " + buildVersion() + "\n"}},
+		{[]string{"--version"}, []string{"mihomo-guard " + buildVersion() + "\n"}},
+		{[]string{"-h"}, []string{"-h, --help", "-v, --version"}},
+		{[]string{"--help"}, []string{"-h, --help", "-v, --version"}},
+		{[]string{"bench", "-h"}, []string{"mihomo-guard bench", "-apply"}},
+		{[]string{"bench", "--help"}, []string{"mihomo-guard bench", "-apply"}},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			out, err := os.CreateTemp(t.TempDir(), "stdout")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer out.Close()
+			original := os.Stdout
+			os.Stdout = out
+			defer func() { os.Stdout = original }()
+			if err := run(context.Background(), tc.args); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(out.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(string(got), want) {
+					t.Errorf("stdout %q is missing %q", got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestInterruptReportsFailedRestoration(t *testing.T) {
 	cancelled := fmt.Errorf("measurement: %w", context.Canceled)
 	if !cleanInterrupt(errors.Join(cancelled, context.Canceled)) {
@@ -148,6 +186,22 @@ func TestCheckManagedGroupAcceptsStandaloneSelectorWithoutChainRead(t *testing.T
 		if name == "" || name == "chain" {
 			t.Fatalf("standalone check read %q: %v", name, fixture.reads)
 		}
+	}
+}
+
+func TestCheckGeoListenerErrorShowsEndpointAndJoinedEmoji(t *testing.T) {
+	const chain = "👩‍💻 示例链"
+	f, server := newCommandController(t)
+	f.proxies[chain] = model.Proxy{Name: chain, Type: "WireGuard", Dialer: "warp"}
+	reject := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer reject.Close()
+	runner := commandRunner(t, server)
+	runner.Cfg.Speed.GeoURL = "https://example.test/geo"
+	_, err := checkManagedGroup(context.Background(), runner, config.Group{Name: "warp", Chain: chain, GeoProxy: reject.URL})
+	if err == nil || !strings.Contains(err.Error(), reject.URL) || !strings.Contains(err.Error(), chain) {
+		t.Fatalf("geo listener diagnostic = %v", err)
 	}
 }
 

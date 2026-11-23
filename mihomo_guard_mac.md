@@ -6,18 +6,18 @@
 
 | 路径 | 选择器 | 后续动作 |
 | --- | --- | --- |
-| ⛓️‍💥 US-WARP | 🔞 WARP-US | 验证链路与 Google 地区，尝试让 🇺🇲 美国节点 跟随 |
-| ⛓️‍💥 SG-WARP | 🔞 WARP-SG | 验证链路，尝试让 🇸🇬 狮城节点 跟随 |
+| dialer-proxy-1 | primary-group-1 | 验证链路与 Google 地区，尝试让 direct-group-1 跟随 |
+| dialer-proxy-2 | primary-group-2 | 验证链路，尝试让 direct-group-2 跟随 |
 | 独立手动组选路 | `mode: selector` 的 `name` | 只切该 select 组，用该组验证新连接的出口 |
 | 候选下载测试 | 独立的 mi-guard-bench | 本地监听器直接引用此组。前置下载样本按 provider 和生效节点名归档 |
 
-守护模式使用 ClashX Meta 正在服务的内核，`/version` 提供运行版本。已有 provider 的候选从控制器读取，保留主配置中的名字前缀与协议参数覆盖。临时手测新订阅时，显式的 `bench --source` 调用安装目录 `.private_core/` 里的内核，使用临时目录、回环端口和仅含源节点的配置。具体配置及安装见 [README](README.md)。
+守护模式使用正在服务的 Mihomo 内核，`/version` 提供运行版本。已有 provider 的候选从控制器读取，保留主配置中的名字前缀与协议参数覆盖。临时手测新订阅时，显式的 `bench --source` 调用 `path_to_your_mihomo_core` 所指内核，使用临时目录、回环端口和仅含源节点的配置。具体配置及安装见 [README](README.md)。
 
-US 和 SG 是默认配置中的两项。用户可以按同样的方式增加其他地区的链式前置，也可以用 `mode: selector` 单独维护普通手动选择组。各模式的必填项、地区监听绑定和完整示例见[随包默认配置](share/mi-guard/mihomo-guard-default.yaml)。
+默认配置提供两个中性的链式示例。用户可以按同样的方式增加其他链式前置，也可以用 `mode: selector` 单独维护普通手动选择组。地区命名仅作为可选的手动测速示例。各模式的必填项、地区监听绑定和完整示例见[随包默认配置](share/mi-guard/mihomo-guard-default.yaml)。
 
 ## 从观测到切换
 
-1. 每 30 秒检测当前 WARP 链。连续两次失败进入恢复，依次轻量验活同组备选，优先尝试有近期成功记录的节点。所有备选不可用时保留原选择。
+1. 每 30 秒检测当前链。连续两次失败进入恢复，依次轻量验活同组备选，优先尝试有近期成功记录的节点。所有备选不可用时保留原选择。
 2. 每 12 小时采样候选，每个节点最多 4 MiB。每 2 小时可对在用前置做 1 MiB 快筛。两个地域的直出组共享前置样本。手测可按组、节点或正则过滤。
 3. `severe_drop_pct: 20` 表示**比此前的正常带宽中位数下降至少 20%**。基准 100 Mbps、当前 80 Mbps 时进入准备，80.01 Mbps 时继续留用。1 分钟后复测，默认需要两次连续降速证据。只有确认存在更好的可用备选才开始切换。
 4. `near_best_pct: 20` 作用于同轮候选。达到本轮最快带宽的 80% 即进入优先档，比较应用层探测失败比例、历史较低分位带宽及当前选择。延迟用于进一步区分。同档宽容和相对自身降速各有独立基准。
@@ -28,14 +28,14 @@ US 和 SG 是默认配置中的两项。用户可以按同样的方式增加其�
 
 裁剪的下载器通过本机专用监听测试一个节点，默认单流。启用多条下载流时，所有流平分同一次节点的总额度，每条连接均核对线上实际链路。请求指定目标字节数，客户端以实际读取字节和墙钟时间计量。到达样本大小或时限时结束。部分读取失败照实计费并记录错误。确认样本上限为 8 MiB，默认账期下载响应体预算为 6 GiB。发请求前预留额度，进程异常退出时采用保守计费。
 
-`speed-history.json` 使用临时文件与原子替换，每个 provider/节点保留最近 50 次带宽样本。记录时间、路径、类型、Mbps、字节、耗时、探测延迟和失败数/尝试数。WARP 心跳单独汇总。带宽预算按账期保存，旧样本移出窗口不会返还已经使用的流量。控制器、测速、历史访问均支持取消。
+`speed-history.json` 使用临时文件与原子替换，每个 provider/节点保留最近 50 次带宽样本。记录时间、路径、类型、Mbps、字节、耗时、探测延迟和失败数/尝试数。链路心跳单独汇总。带宽预算按账期保存，旧样本移出窗口不会返还已经使用的流量。控制器、测速、历史访问均支持取消。
 
 <details>
 <summary>原始 v2 方案（历史记录）</summary>
 
 # `mihomo-guard` 工具架构与详细设计文档（v2 · Mac 专用精简版）
 
-> **文档定位**：本规格书面向 AI 编程助手（`agy`）与 Go 开发者，完整定义了 macOS 环境下配合 ClashX Meta（Mihomo 内核）运行的轻量级代理守护工具 `mihomo-guard` 的架构、接口、配置与验收标准，可直接作为编码实施依据。
+> **文档定位**：本规格书面向 AI 编程助手与 Go 开发者，完整定义了 macOS 环境下配合 ClashX Meta（Mihomo 内核）运行的轻量级代理守护工具 `mihomo-guard` 的架构、接口、配置与验收标准，可直接作为编码实施依据。
 
 ---
 
@@ -44,13 +44,13 @@ US 和 SG 是默认配置中的两项。用户可以按同样的方式增加其�
 ### 1.1 业务痛点
 在 macOS 长期以 Mihomo 作为主力代理内核的场景下，存在三类内核原生策略（`url-test` / `fallback`）无法同时解决的痛点：
 1. **带宽与 IP 粘性矛盾**：美区（US）和新加坡（SG）出口均需依赖手工筛选的高带宽节点，并要求日常保持强 IP 粘性（不因延迟微幅波动频繁跳 IP 触发风控）；但机场单个节点偶发断连或晚高峰严重限速不可控。
-2. **链式 WARP 的“假活送港”**：美区链式代理（`机场前置 -> ⛓️‍💥 US-WARP`）即使 204 连通正常，特定前置对应的 Cloudflare `/24` 出口池仍可能被 Google 动态判为香港/受限地区（导致搜索跳 `.hk`、AI Mode / Gemini 不可用）。
+2. **链式 WARP 的“假活送港”**：美区链式代理（`机场前置 -> dialer-proxy-1`）即使 204 连通正常，特定前置对应的 Cloudflare `/24` 出口池仍可能被 Google 动态判为香港/受限地区（导致搜索跳 `.hk`、AI Mode / Gemini 不可用）。
 3. **链式切换后的 UDP 残留**：切换 `dialer-proxy` 上游节点后，WireGuard 已有连接可能继续死磕旧死链，需主动清理活跃连接以实现秒级恢复。
 
 ### 1.2 范围边界（Scope）
 * **支持平台**：**仅限 macOS（Apple Silicon / `darwin/arm64`）**，放弃 OpenWrt 路由器端适配，彻底降低构建、内存与配置同步复杂度（路由器端由原生 Mihomo `fallback` 兜底）。
 * **核心复用**：直接将 `github.com/faceair/clash-speedtest/speedtester` 作为 Go 依赖包引入，复用其并发下载测速能力，避免重复造轮子。
-* **纳管目标**：聚焦 4 个核心出口策略组——`🇺🇲 美国节点`、`🇸🇬 狮城节点`、`🔞 WARP-US`、`🔞 WARP-SG`。
+* **纳管目标**：聚焦 4 个核心出口策略组——`direct-group-1`、`direct-group-2`、`primary-group-1`、`primary-group-2`。
 
 ---
 
@@ -62,9 +62,9 @@ US 和 SG 是默认配置中的两项。用户可以按同样的方式增加其�
 2. **如何解决 Mac 开启 TUN 后的测速“回环套娃”？**
    * `speedtester` 会直接向机场节点发起外联；若不放行，流量会被 ClashX Meta 的系统级 TUN 再次劫持，导致测速失真或死循环。
    * **解法**：在 Mihomo `rules` 最顶部仅加 1 条 `- PROCESS-NAME,mihomo-guard,DIRECT`，把工具进程自身发出的物理节点测速流量直接放行到物理网卡。
-3. **如何在不复制 WARP 私钥的前提下实现 `US-WARP` 防送港？**
-   * `speedtester` 负责单跳机场节点的并发带宽排序，不负责经 `⛓️‍💥 US-WARP` 链式出站后的 Google 地区校验。
-   * **解法**：在 Mihomo 配置中仅增加一个 5 行 `listeners` 本地端口（`127.0.0.1:7898`），直接绑定到现成的 `⛓️‍💥 US-WARP` 代理节点。触发故障切换时，工具先用 `speedtester` 并发算出带宽榜 `[N1, N2, ...]`，再按榜热切并经 `:7898` 逐一验证 `.google.com`，兼顾零配置冗余与端到端准确性。
+3. **如何在不复制 WARP 私钥的前提下实现链路地区校验？**
+   * `speedtester` 负责单跳机场节点的并发带宽排序，不负责经 `dialer-proxy-1` 链式出站后的 Google 地区校验。
+   * **解法**：在 Mihomo 配置中仅增加一个 5 行 `listeners` 本地端口（`127.0.0.1:7898`），直接绑定到现成的 `dialer-proxy-1` 代理节点。该节点的 Mihomo `dialer-proxy` 设为 `primary-group-1`。触发故障切换时，工具先用 `speedtester` 并发算出带宽榜 `[N1, N2, ...]`，再按榜热切并经 `:7898` 逐一验证 `.google.com`，兼顾零配置冗余与端到端准确性。
 
 ### 2.2 架构方案优缺点对比
 
@@ -83,13 +83,13 @@ US 和 SG 是默认配置中的两项。用户可以按同样的方式增加其�
 运行 `mihomo-guard` 前，需在 Mac 的 Mihomo 配置文件中补充以下两处增量（共 6 行有效配置）：
 
 ```yaml
-# 1. 顶层新增：专供 mihomo-guard 直连校验 ⛓️‍💥 US-WARP 出口状态（绕过 rules）
+# 1. 顶层新增：专供 mihomo-guard 直连校验 dialer-proxy-1 出口状态（绕过 rules）
 listeners:
-  - name: guard-warp-us
+  - name: mi-guard-geo-in
     type: mixed
     port: 7898
     listen: 127.0.0.1
-    proxy: ⛓️‍💥 US-WARP
+    proxy: dialer-proxy-1
 
 # 2. rules 最顶部新增：放行本工具进程，避免 clash-speedtest 测速流量被 TUN 劫持套娃
 rules:
@@ -116,7 +116,7 @@ rules:
 +---------------------|------------------|-----------------|--------+
                       |                  |                 |
                       v                  v                 v
-               ClashX Meta        直连机场物理节点     经 ⛓️‍💥 US-WARP
+               ClashX Meta        直连机场物理节点     经 dialer-proxy-1
             (REST Control API)  (PROCESS-NAME直连)   校验 .google.com
 ```
 
@@ -167,7 +167,7 @@ rules:
 
 | 探针层级 | 默认周期 | 作用范围 | 执行通道与判定标准 |
 | :--- | :--- | :--- | :--- |
-| **L1 存活探针** | `45s` | 仅当前活跃节点 | 调用 `GET /proxies/{target}/delay?url=https://www.gstatic.com/generate_204&timeout=3000`。对于 `🔞 WARP-US` / `🔞 WARP-SG`，通过 `liveness_proxy_override` 直接探测 `⛓️‍💥 US-WARP` / `⛓️‍💥 SG-WARP`，确保端到端隧道存活而非仅前置存活。 |
+| **L1 存活探针** | `45s` | 仅当前活跃节点 | 调用 `GET /proxies/{target}/delay?url=https://www.gstatic.com/generate_204&timeout=3000`。对于 `primary-group-1` / `primary-group-2`，通过 `liveness_proxy_override` 直接探测 `dialer-proxy-1` / `dialer-proxy-2`，确保端到端隧道存活而非仅前置存活。 |
 | **L2 防送港探针** | `5m` | 仅开启 `enable_geo_check` 的组 | 经 `geo_proxy_addr`（如 `socks5://127.0.0.1:7898`）GET 请求 `https://www.google.com/searchdomaincheck?format=domain`，`strings.TrimSpace` 后**严格等于 `.google.com`**；同时请求 `https://www.cloudflare.com/cdn-cgi/trace` 解析 `ip=`、`colo=`、`loc=` 打印进结构化日志。 |
 | **L3 带宽抽检探针** | `30m` | 仅当前活跃节点 | 调用 `speedtester` 单独对当前 `now` 节点发起 1 次下载测速；仅当实测速率低于 `min_speed_mbps` 时立即转入 `FAILOVER` 触发全组并发重选。 |
 
@@ -175,17 +175,17 @@ rules:
 
 1. **构建候选池**：从 Mihomo `GET /proxies/{group}` 读取 `all` 列表，过滤掉：
    * 非物理节点（`DIRECT`、`REJECT`、嵌套策略组）；
-   * 命中 `exclude_regex` 的节点（如 `free_cf`、`US1`、过期/剩余流量提示行）；
+   * 命中 `exclude_regex` 的节点（如 `example-free`、`example-excluded`、过期/剩余流量提示行）；
    * 当前触发故障的坏节点（若过滤后列表为空则保留，防止单节点组无路可退）。
 2. **并发带宽排行**：通过 `clash-speedtest/speedtester` 加载 `mihomo.config_path`，仅针对上述候选池执行并发下载测速，剔除测速失败/超时的节点，按下载速率（MB/s）降序排列（速率相近时按 TTFB 升序），产出有序榜单 `[N1, N2, ..., Nk]`。若榜单为空，触发“全挂保护”，维持原节点并结束本轮。
-3. **无 Geo 校验组（如 `🇸🇬 狮城节点`、`🔞 WARP-SG`）**：
+3. **无 Geo 校验组（如 `direct-group-2`、`primary-group-2`）**：
    * 直接调用 `PUT /proxies/{group}` 切换至 `N1`。
    * 若配置了 `cleanup_chain_targets`，立即清理僵尸连接。
    * 进入 `COOLDOWN`。
-4. **开启 Geo 校验组（如 `🔞 WARP-US`）**：
+4. **开启 Geo 校验组（如 `primary-group-1`）**：
    * 顺序遍历榜单 `Ni`（`i = 1..k`）：
      1. 调用 `PUT /proxies/{group}` 切换至 `Ni`。
-     2. 清理 `cleanup_chain_targets`（如 `⛓️‍💥 US-WARP`）及旧节点关联的活跃连接，并等待 `300ms` 让新隧道就绪。
+     2. 清理 `cleanup_chain_targets`（如 `dialer-proxy-1`）及旧节点关联的活跃连接，并等待 `300ms` 让新隧道就绪。
      3. 经 `geo_proxy_addr`（禁用 Keep-Alive）执行 L2 探针校验 `.google.com`。
      4. 若校验通过：记录 `ip`、`colo` 与实测带宽，锁定 `Ni` 为新粘性节点，进入 `COOLDOWN` 并返回。
      5. 若校验失败（送港）：打印 `WARN` 日志并继续尝试 `Ni+1`。
@@ -194,7 +194,7 @@ rules:
      * `strict_geo_fallback == true`：回切至原节点，等待下个周期重试。
 
 ### 4.6 链式僵尸连接清理逻辑
-当需要清理目标链（如 `["⛓️‍💥 US-WARP"]`）时：
+当需要清理目标链（如 `["dialer-proxy-1"]`）时：
 1. 调用 `GET /connections` 获取当前所有活跃连接。
 2. 筛选 `conn.Chains` 中包含任意 `cleanup_chain_targets` 元素或包含被换下旧节点名称的连接 ID。
 3. 并发调用 `DELETE /connections/{id}` 断开旧隧道，促使业务侧下一跳请求立即建立新隧道连接。
@@ -308,7 +308,7 @@ mihomo:
   api_url: "http://127.0.0.1:9090"
   secret: ""                         # 与 Mihomo 配置中的 secret 保持一致
   # 供 clash-speedtest/speedtester 加载订阅与节点的本地 Mihomo 配置文件路径（支持 ~ 展开）
-  config_path: "~/.config/clash/config.yaml"
+  config_path: path_to_your_config.yaml
   http_timeout: 5s
 
 speedtest:
@@ -324,9 +324,9 @@ speedtest:
 
 groups:
   # 1. 美区原生出口
-  - name: "🇺🇲 美国节点"
+  - name: direct-group-1
     enabled: true
-    exclude_regex: "(?i)(free_cf|剩余|到期|官网|DIRECT|REJECT)"
+    exclude_regex: "(?i)(example-free|剩余|到期|官网|DIRECT|REJECT)"
     liveness_interval: 45s
     bandwidth_check_interval: 30m
     enable_geo_check: false          # 若 💡 Google 改走原生美区，可按需开启并配 geo_proxy_addr
@@ -336,9 +336,9 @@ groups:
     cleanup_chain_targets: []
 
   # 2. 新加坡主力出口
-  - name: "🇸🇬 狮城节点"
+  - name: direct-group-2
     enabled: true
-    exclude_regex: "(?i)(free_cf|剩余|到期|官网|DIRECT|REJECT)"
+    exclude_regex: "(?i)(example-free|剩余|到期|官网|DIRECT|REJECT)"
     liveness_interval: 45s
     bandwidth_check_interval: 30m
     enable_geo_check: false
@@ -347,11 +347,11 @@ groups:
     cooldown: 5m
     cleanup_chain_targets: []
 
-  # 3. 链式 US-WARP 前置（端到端保活 + 强防送港 + 僵尸连接清理）
-  - name: "🔞 WARP-US"
+  # 3. 链式第一组前置（端到端保活 + 强防送港 + 僵尸连接清理）
+  - name: primary-group-1
     enabled: true
-    liveness_proxy_override: "⛓️‍💥 US-WARP"
-    exclude_regex: "(?i)(free_cf|US1)"
+    liveness_proxy_override: dialer-proxy-1
+    exclude_regex: "(?i)(example-free|example-excluded)"
     liveness_interval: 45s
     bandwidth_check_interval: 30m
     enable_geo_check: true
@@ -361,20 +361,20 @@ groups:
     min_speed_mbps: 3.0
     fail_threshold: 2
     cooldown: 5m
-    cleanup_chain_targets: ["⛓️‍💥 US-WARP"]
+    cleanup_chain_targets: [dialer-proxy-1]
 
-  # 4. 链式 SG-WARP 前置
-  - name: "🔞 WARP-SG"
+  # 4. 链式第二组前置
+  - name: primary-group-2
     enabled: true
-    liveness_proxy_override: "⛓️‍💥 SG-WARP"
-    exclude_regex: "(?i)(free_cf)"
+    liveness_proxy_override: dialer-proxy-2
+    exclude_regex: "(?i)(example-free)"
     liveness_interval: 60s
     bandwidth_check_interval: 45m
     enable_geo_check: false
     min_speed_mbps: 3.0
     fail_threshold: 2
     cooldown: 5m
-    cleanup_chain_targets: ["⛓️‍💥 SG-WARP"]
+    cleanup_chain_targets: [dialer-proxy-2]
 
 logging:
   level: "info"                      # debug | info | warn | error
@@ -390,7 +390,7 @@ logging:
 | 命令 | 说明 | 示例 |
 | :--- | :--- | :--- |
 | `daemon` | 前台/守护常驻运行，按配置执行全组粘性保活、抽检与自动切线 | `./mihomo-guard daemon -c ~/.config/mihomo-guard/config.yaml` |
-| `bench` | 手动对指定组（或全部启用组）执行并发带宽测速并输出排行表；带 `--apply` 自动热切至最优合规节点 | `./mihomo-guard bench -c config.yaml -g "🔞 WARP-US" --apply` |
+| `bench` | 手动对指定组（或全部启用组）执行并发带宽测速并输出排行表；带 `--apply` 自动热切至最优合规节点 | `./mihomo-guard bench -c config.yaml -g primary-group-1 --apply` |
 | `status` | 读取并表格化展示各纳管组当前在 Mihomo 中的选中节点、当前延迟与（若开启 Geo）当前 Google 地区及 CF 落点 | `./mihomo-guard status -c config.yaml` |
 
 ### 7.2 构建与 `launchd` 常驻部署
@@ -405,20 +405,20 @@ logging:
 
 ---
 
-## 8. 给 `agy` 的实现防踩坑指引与验收标准
+## 8. 实现防踩坑指引与验收标准
 
 ### 8.1 开发防踩坑清单（必读）
 1. **先读依赖包真实签名再编码**：执行 `go get github.com/faceair/clash-speedtest@latest` 后，**务必先运行 `go doc github.com/faceair/clash-speedtest/speedtester`** 核对导出结构体（如 `Config`、`SpeedTester`、`Result`）的精确字段名与方法签名，严禁凭记忆编造字段。同时注意该库采用 **GPL-3.0** 协议（自用完全无问题，仓库内保留合规声明即可）。
 2. **严禁仅用 `go run` 做端到端联调**：`go run` 编译出的临时可执行文件进程名并非 `mihomo-guard`，会被 ClashX Meta 的 TUN 劫持导致测速走代理套娃。联调与验收前必须先 `go build -o mihomo-guard ./cmd/mihomo-guard` 后直接执行二进制文件。
-3. **强制 URL 路径编码**：策略组名（`🇺🇲 美国节点`、`🔞 WARP-US`）和节点名包含 Emoji、中文及空格，拼接 `:9090` API 路径时必须全部经由 `url.PathEscape(name)` 处理。
+3. **强制 URL 路径编码**：策略组名和节点名可能包含 Emoji、中文及空格，拼接 `:9090` API 路径时必须全部经由 `url.PathEscape(name)` 处理。
 4. **Geo 探针强制禁用连接复用**：`internal/tester/geo.go` 构造 `http.Client` 时必须设置 `Transport.DisableKeepAlives = true`（并在请求结束关闭 Body），防止热切前置节点后复用到旧 TCP/SOCKS5 连接导致读出过期地区结果。
-5. **配置文件加载的相对路径处理**：`clash-speedtest` 解析 `config.yaml` 中的 `proxy-providers` 相对路径（如 `./proxy_providers/vipuser_trojan.yaml`）时，需注意其工作目录或 `ConfigPaths` 解析行为；确保无论在何处启动 `mihomo-guard`，都能正确解析位于 `~/.config/clash/` 下的订阅缓存文件。
+5. **配置文件加载的相对路径处理**：`clash-speedtest` 解析 `config.yaml` 中的 `proxy-providers` 相对路径（如 `./proxy_providers/proxy-providers-1.yaml`）时，需注意其工作目录或 `ConfigPaths` 解析行为；确保无论在何处启动 `mihomo-guard`，都能正确解析与 Mihomo 主配置关联的订阅缓存文件。
 6. **Mihomo 重启与断网容错**：当 `:9090` 返回 `connection refused` 或超时，严禁 `panic` 或退出进程，应输出 `WARN` 日志并指数退避（`5s -> 15s -> 30s`）等待 Mihomo 恢复。
 
 ### 8.2 验收测试用例（Acceptance Checklist）
-1. **无套娃并发测速验收**：执行 `./mihomo-guard bench -c config.yaml -g "🇸🇬 狮城节点"`，同时在 ClashX Meta「连接」面板确认 `mihomo-guard` 进程的所有测速连接均命中 `DIRECT`，且终端 10 秒内打印完整按速率降序排列的表格。
-2. **WARP 顺位防送港验收**：执行 `./mihomo-guard bench -c config.yaml -g "🔞 WARP-US" --apply`，确认工具切至实测最快且经 `:7898` 验证返回 `.google.com` 的前置节点，日志输出对应的 `ip` 与 `colo`，且旧 `⛓️‍💥 US-WARP` 活跃连接被正确清理。
-3. **人工干预尊重验收**：`daemon` 运行中，在 ClashX Meta 手动切换 `🇸🇬 狮城节点` 到另一个正常节点，观察日志记录 `manual_override_detected` 且守护进程接受新节点、不会将其改回。
+1. **无套娃并发测速验收**：执行 `./mihomo-guard bench -c config.yaml -g primary-group-2`，同时在 ClashX Meta「连接」面板确认 `mihomo-guard` 进程的所有测速连接均命中 `DIRECT`，且终端 10 秒内打印完整按速率降序排列的表格。
+2. **WARP 顺位防送港验收**：执行 `./mihomo-guard bench -c config.yaml -g primary-group-1 --apply`，确认工具切至实测最快且经 `:7898` 验证返回 `.google.com` 的前置节点，日志输出对应的 `ip` 与 `colo`，且旧 `dialer-proxy-1` 活跃连接被正确清理。
+3. **人工干预尊重验收**：`daemon` 运行中，在 ClashX Meta 手动切换 `primary-group-2` 到另一个正常节点，观察日志记录 `manual_override_detected` 且守护进程接受新节点、不会将其改回。
 4. **故障自愈验收**：临时将某组 `fail_threshold` 调为 `1` 并手动将其切至超时节点，确认 1 个检测周期内自动触发 `FAILOVER` 并发测速并热切回最优可用节点。
 5. **优雅退出验收**：向运行中的 `daemon` 发送 `Ctrl+C`（`SIGINT`），确认进程立刻取消进行中的网络请求并干净退出，退出码为 `0`。
 

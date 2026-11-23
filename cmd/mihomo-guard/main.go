@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"syscall"
@@ -27,6 +28,9 @@ import (
 
 const usage = `mihomo-guard <command> [-c guard.yaml]
 
+  -v, --version  Print the mihomo-guard version
+  -h, --help     Show this help (use <command> --help for its options)
+
   init          Write a new guard configuration
   check         Verify controller, isolated measurement route and managed groups
   status        Show current groups and accounted usage (--probe for fresh checks)
@@ -36,6 +40,19 @@ const usage = `mihomo-guard <command> [-c guard.yaml]
   daemon        Run heartbeats, capped speed checks and failover
   notify-setup  Request macOS notification permission for the bundled helper
 `
+
+// Release packages set this from the same version used for the archive and app.
+var releaseVersion string
+
+func buildVersion() string {
+	if releaseVersion != "" {
+		return releaseVersion
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return strings.TrimPrefix(info.Main.Version, "v")
+	}
+	return "dev"
+}
 
 type stringsFlag []string
 
@@ -59,7 +76,7 @@ type benchOptions struct {
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Args[1:]); err != nil && !errors.Is(err, flag.ErrHelp) && !cleanInterrupt(err) {
+	if err := run(ctx, os.Args[1:]); err != nil && !cleanInterrupt(err) {
 		fmt.Fprintln(os.Stderr, "mihomo-guard:", err)
 		os.Exit(1)
 	}
@@ -88,7 +105,18 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 	cmd := args[0]
+	if cmd == "-v" || cmd == "--version" {
+		fmt.Println("mihomo-guard", buildVersion())
+		return nil
+	}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: mihomo-guard %s [options]\n", cmd)
+		fs.PrintDefaults()
+	}
+	var help bool
+	fs.BoolVar(&help, "h", false, "show this command's help")
+	fs.BoolVar(&help, "help", false, "show this command's help")
 	path := config.DefaultPath()
 	fs.StringVar(&path, "c", path, "guard YAML file")
 	fs.StringVar(&path, "config", path, "guard YAML file")
@@ -113,6 +141,11 @@ func run(ctx context.Context, args []string) error {
 	}
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
+	}
+	if help {
+		fs.SetOutput(os.Stdout)
+		fs.Usage()
+		return nil
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected positional arguments %q", fs.Args())
@@ -183,7 +216,7 @@ func run(ctx context.Context, args []string) error {
 		if opt.apply && opt.group != "" {
 			g, known := r.Managed(opt.group)
 			if !known {
-				return fmt.Errorf("--apply requires a managed group, got %q", opt.group)
+				return fmt.Errorf("--apply requires a managed group, got %s", model.QuoteName(opt.group))
 			}
 			groups = []config.Group{g}
 		}
@@ -205,7 +238,7 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("live core is missing the configured test selector or its candidates")
 		}
 		if err := r.CheckIngress(ctx, c.Mihomo.TestProxy, c.Speed.URL, c.Mihomo.TestGroup, p.Now); err != nil {
-			return fmt.Errorf("cannot verify live test listener for current member %q: %w", p.Now, err)
+			return fmt.Errorf("cannot verify live test listener %s for current member %s: %w", c.Mihomo.TestProxy, model.QuoteName(p.Now), err)
 		}
 		for _, g := range c.Groups {
 			nodes, e := checkManagedGroup(ctx, r, g)
@@ -309,7 +342,7 @@ func checkManagedGroup(ctx context.Context, r *guard.Runner, g config.Group) ([]
 	target := g.ProbeTarget()
 	if g.GeoProxy != "" {
 		if err := r.CheckIngress(ctx, g.GeoProxy, r.Cfg.Speed.GeoURL, target); err != nil {
-			return nil, fmt.Errorf("cannot verify live geo listener for %q: %w", target, err)
+			return nil, fmt.Errorf("cannot verify live geo listener %s for %s: %w", g.GeoProxy, model.QuoteName(target), err)
 		}
 	}
 	return r.Candidates(ctx, g.Name)
@@ -340,7 +373,7 @@ func bench(ctx context.Context, r *guard.Runner, o benchOptions) error {
 	for _, group := range groups {
 		if o.apply {
 			if _, ok := r.Managed(group); !ok {
-				return fmt.Errorf("--apply requires a managed selector, got %q", group)
+				return fmt.Errorf("--apply requires a managed selector, got %s", model.QuoteName(group))
 			}
 			p, e := r.Core.Proxy(ctx, group)
 			if e != nil {
@@ -362,7 +395,7 @@ func bench(ctx context.Context, r *guard.Runner, o benchOptions) error {
 	}
 	for _, exact := range o.nodes {
 		if !slices.Contains(nodes, exact) {
-			return fmt.Errorf("node %q is missing or filtered out", exact)
+			return fmt.Errorf("node %s is missing or filtered out", model.QuoteName(exact))
 		}
 	}
 	if len(nodes) == 0 {
@@ -397,7 +430,7 @@ func bench(ctx context.Context, r *guard.Runner, o benchOptions) error {
 			}
 			ranked := policy.Rank(previous[name], measured, past.Samples, r.Cfg.Selection.NearBestPct)
 			if len(ranked) == 0 {
-				return fmt.Errorf("no working candidate for %q", name)
+				return fmt.Errorf("no working candidate for %s", model.QuoteName(name))
 			}
 			selected, e := r.Apply(ctx, g, previous[name], ranked)
 			if e != nil {

@@ -830,9 +830,12 @@ def exercise(core: Path, guard: Path) -> None:
                         "--group",
                         "Managed",
                         "--filter",
-                        "Node (Slow|Fast)",
+                        "Node (Dead|Slow|Fast)",
                     )
                     assert_names(dry, "Node Slow", "Node Fast")
+                    dead_row = next((row for row in dry.splitlines() if row.startswith("Node Dead ")), "")
+                    if not dead_row.rstrip().endswith(("204 probe: HTTP 503", "204 probe: HTTP 504")):
+                        raise AssertionError(f"unexpected failed-probe result row: {dead_row}")
                     after_dry = {
                         name: selection(controller_port, secret, name) for name in initial
                     }

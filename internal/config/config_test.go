@@ -33,6 +33,49 @@ func TestInitAndDefaults(t *testing.T) {
 	}
 }
 
+func TestDefaultReferenceUsesPublicPlaceholders(t *testing.T) {
+	var c Config
+	if err := yaml.UnmarshalStrict(example, &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.Mihomo.ConfigPath != "path_to_your_config.yaml" || c.Mihomo.StableBinary != "path_to_your_mihomo_core" {
+		t.Fatalf("default paths = %q, %q", c.Mihomo.ConfigPath, c.Mihomo.StableBinary)
+	}
+	want := []Group{
+		{Name: "primary-group-1", Chain: "dialer-proxy-1", Direct: "direct-group-1"},
+		{Name: "primary-group-2", Chain: "dialer-proxy-2", Direct: "direct-group-2"},
+	}
+	if len(c.Groups) != len(want) {
+		t.Fatalf("default groups = %+v", c.Groups)
+	}
+	for i := range want {
+		if c.Groups[i].Name != want[i].Name || c.Groups[i].Chain != want[i].Chain || c.Groups[i].Direct != want[i].Direct {
+			t.Fatalf("default group %d = %+v, want names %+v", i, c.Groups[i], want[i])
+		}
+	}
+
+	overlay, err := ReadCoreFile(filepath.Join("..", "..", "share", "mi-guard", "mihomo-overlay.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := overlay.CheckBench(c.Mihomo); err != nil {
+		t.Fatalf("shipped overlay does not match default bench wiring: %v", err)
+	}
+	geoListeners := 0
+	for _, g := range c.Groups {
+		if g.GeoProxy == "" {
+			continue
+		}
+		geoListeners++
+		if err := overlay.checkListener(g.GeoProxy, g.ProbeTarget()); err != nil {
+			t.Fatalf("shipped overlay does not match geo wiring for %q: %v", g.Name, err)
+		}
+	}
+	if geoListeners == 0 {
+		t.Fatal("default reference has no enabled geo listener to cross-check")
+	}
+}
+
 func TestNotificationHelperExplicitPathStillResolvesFromConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "guard.yaml")
 	if err := WriteExample(path); err != nil {

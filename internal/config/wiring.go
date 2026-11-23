@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/lonelygo/mi-guard/internal/model"
 	"gopkg.in/yaml.v2"
 )
 
@@ -72,7 +73,7 @@ func (f *CoreFile) checkListener(addr, target string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("need a loopback listener %s bound to %q in the serving Mihomo config (see share/mi-guard/mihomo-overlay.yaml)", addr, target)
+	return fmt.Errorf("need a loopback listener %s bound to %s in the serving Mihomo config (see share/mi-guard/mihomo-overlay.yaml)", addr, model.QuoteName(target))
 }
 func (f *CoreFile) CheckBench(core Core) error {
 	if err := f.checkListener(core.TestProxy, core.TestGroup); err != nil {
@@ -85,7 +86,7 @@ func (f *CoreFile) CheckBench(core Core) error {
 		}
 	}
 	if uses != 1 {
-		return fmt.Errorf("expected exactly one dedicated listener for %q, found %d", core.TestGroup, uses)
+		return fmt.Errorf("expected exactly one dedicated listener for %s, found %d", model.QuoteName(core.TestGroup), uses)
 	}
 	found := false
 	for _, g := range f.Groups {
@@ -94,18 +95,18 @@ func (f *CoreFile) CheckBench(core Core) error {
 		}
 		for _, n := range g.Proxies {
 			if n == core.TestGroup {
-				return fmt.Errorf("bench selector is also used by %q", g.Name)
+				return fmt.Errorf("bench selector is also used by %s", model.QuoteName(g.Name))
 			}
 		}
 	}
 	for _, p := range f.Proxies {
 		if p.Dialer == core.TestGroup {
-			return fmt.Errorf("bench selector is a production dialer for %q", p.Name)
+			return fmt.Errorf("bench selector is a production dialer for %s", model.QuoteName(p.Name))
 		}
 	}
 	for name, p := range f.Providers {
 		if p.Override.Dialer == core.TestGroup {
-			return fmt.Errorf("bench selector is a dialer for provider %q", name)
+			return fmt.Errorf("bench selector is a dialer for provider %s", model.QuoteName(name))
 		}
 	}
 	rules := append([]string(nil), f.Rules...)
@@ -120,7 +121,7 @@ func (f *CoreFile) CheckBench(core Core) error {
 		}
 	}
 	if !found {
-		return fmt.Errorf("missing dedicated select group %q", core.TestGroup)
+		return fmt.Errorf("missing dedicated select group %s", model.QuoteName(core.TestGroup))
 	}
 	return nil
 }
@@ -145,12 +146,12 @@ func (f *CoreFile) checkManagedTarget(g Group) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("group %q must be a select group in the serving config", g.Name)
+		return fmt.Errorf("group %s must be a select group in the serving config", model.QuoteName(g.Name))
 	}
 	for _, proxy := range f.Proxies {
 		if proxy.Name == g.Chain && proxy.Dialer == g.Name {
 			return nil
 		}
 	}
-	return fmt.Errorf("%q must use dialer-proxy %q in the serving config", g.Chain, g.Name)
+	return fmt.Errorf("%s must use dialer-proxy %s in the serving config", model.QuoteName(g.Chain), model.QuoteName(g.Name))
 }

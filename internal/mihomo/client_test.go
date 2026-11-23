@@ -66,10 +66,10 @@ func TestClientCoreOperations(t *testing.T) {
 	if err != nil || proxy.Name != "group with/slash" {
 		t.Fatalf("Proxy() = %#v, %v", proxy, err)
 	}
-	if err := client.Select(ctx, "🔞 WARP-US", "US / 01"); err != nil {
+	if err := client.Select(ctx, "测试组 🧪", "节点 / 01"); err != nil {
 		t.Fatal(err)
 	}
-	if selected.Group != "🔞 WARP-US" || selected.Node != "US / 01" {
+	if selected.Group != "测试组 🧪" || selected.Node != "节点 / 01" {
 		t.Fatalf("Select sent %#v", selected)
 	}
 	delay, err := client.Delay(ctx, "node", "https://example.test/204?a=b", 3*time.Second)

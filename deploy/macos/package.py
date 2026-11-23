@@ -103,7 +103,7 @@ def main() -> int:
         share = package_root / "share/mi-guard"
         cli.parent.mkdir(parents=True)
         share.mkdir(parents=True)
-        shutil.copyfile(build_dir / "mihomo-guard", cli)
+        shutil.copy(build_dir / "mihomo-guard", cli)
         shutil.copytree(build_dir / "mi-guard.app", app)
         for name in ("mihomo-guard-default.yaml", "mihomo-overlay.yaml"):
             shutil.copyfile(repo / "share/mi-guard" / name, share / name)
@@ -114,6 +114,9 @@ def main() -> int:
         plist = app / "Contents/Info.plist"
         verify_binary(cli, args.deployment_target, repo)
         verify_binary(helper, args.deployment_target, repo)
+        cli_version = output(str(cli), "--version", cwd=repo).strip()
+        if cli_version != f"mihomo-guard {args.version}":
+            raise RuntimeError(f"unexpected packaged CLI version: {cli_version}")
         for key, expected in (
             ("CFBundleShortVersionString", args.version),
             ("CFBundleVersion", args.version),

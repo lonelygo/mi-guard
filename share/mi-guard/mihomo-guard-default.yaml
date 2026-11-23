@@ -1,16 +1,17 @@
 # mihomo-guard-default.yaml — 默认配置、选项说明和地区组示例
 #
 # 首次运行 mihomo-guard init 会创建 ~/.config/mihomo-guard/mihomo-guard.yaml。
-# 编辑自己的配置文件。每次升级后，可用随包的本文件对照新增选项。
-# 所有子命令均可用 -c /path/to/guard.yaml 或 --config 指定另一份 guard 配置。
+# 将 config_path 和组名替换为自己的配置，使用 bench --source 时再填写 stable_binary。
+# 每次升级后，可用本文件对照新增选项。
+# 所有子命令均可用 -c path_to_your_guard_config.yaml 或 --config 指定另一份 guard 配置。
 # 文件路径支持 ~/，相对路径以正在使用的 guard 配置所在目录为基准。
 
 mihomo:
   controller: http://127.0.0.1:9090 # 在线内核的外部控制器。使用带端口的回环 HTTP(S) 地址。
   secret: ""                       # 留空时从 config_path 所指文件读取控制器的 secret。
-  config_path: ~/.config/clash.meta/mihomo-2026.yaml # 正在使用的 Mihomo 主配置，供读取接线与 secret。
+  config_path: path_to_your_config.yaml # 正在使用的 Mihomo 主配置，供读取接线与 secret。
   # 仅 bench --source 需要这个可执行文件，以启动测试新订阅的临时内核。
-  stable_binary: ~/Library/Application Support/com.metacubex.ClashX.meta/.private_core/com.metacubex.ClashX.ProxyConfigHelper.meta
+  stable_binary: path_to_your_mihomo_core
   allow_prerelease: false           # 默认要求临时内核报告正式版本。true 允许测试预发布内核。
   test_group: mi-guard-bench        # 测速专用的可写 select 组，与 Mihomo 配置中的名称一致。
   test_proxy: http://127.0.0.1:17987 # 绑定 test_group 的专用回环监听。支持 http、socks5、socks5h，须带端口。
@@ -59,42 +60,43 @@ notifications:
   switch: true               # 发送实际换线结果。
   helper: auto               # 自动找到安装包、源码构建或用户 Applications 下的助手，也可指定 .app 或可执行文件路径。
 
-# 省略 groups 会使用下面的 US、SG 默认组。显式提供 groups 会替换整个列表。
-# 要保留 US、SG，可在它们后面追加 HK、TW。daemon 至少需要一项。
+# 省略 groups 会使用下面两个默认链式示例。显式提供 groups 会替换整个列表。
+# 要保留这两项，可在它们后面追加其他链或手动选择组。daemon 至少需要一项。
 # 仅手动指定组、节点或来源测速时可写 groups: []。
 #
 # name 必须是 Mihomo 中可写 select 组的完整名称，包括 emoji、空格和标点。
-# chain 模式用 name 选择链式前置，要求填写 chain，可选择性地添加跟随组 direct。
+# chain 模式用 name 选择链式前置，要求填写不同名的 chain，可选择性地添加跟随组 direct。
+# 下例中，Mihomo 链节点 dialer-proxy-1 通过 dialer-proxy: primary-group-1 使用前置组。
 # selector 模式直接管理 name，省略 chain 和 direct。可应用的节点须直接属于 name，也须在 test_group 中。
 # 各组的 name、chain、direct 和专用测速组的名称应各自唯一。将跟随组改为独立管理时，先移除原 direct 引用。
 # geo_proxy 和 expected_geo 成对设置。两者都留空时跳过地区检查。
 # 设置 geo_proxy 时，其监听在 chain 模式绑定 chain，在 selector 模式绑定 name。
 groups:
-  - name: "🔞 WARP-US"
+  - name: primary-group-1
     mode: chain                 # 省略 mode 也按 chain 处理，兼容 v0.1.0 配置。
-    chain: "⛓️‍💥 US-WARP"       # 其 dialer-proxy 使用 name 指定的前置组。选线后验证这条链。
-    direct: "🇺🇲 美国节点"      # 可选的跟随组，留空即只切前置。该组跟随失败时保留健康前置。
+    chain: dialer-proxy-1       # 选线后验证此链节点的实际路径。
+    direct: direct-group-1      # 可选的跟随组，留空即只切前置。该组跟随失败时保留健康前置。
     geo_proxy: http://127.0.0.1:7898 # 用于地区检查的回环 HTTP/SOCKS 监听地址，须带端口。
     expected_geo: .google.com   # 与 geo_url 返回的文本去除首尾空白后的值精确比较。
     strict_geo: false           # false 时可回退到首个链路可用候选。true 要求该候选同时通过地区校验。
     exclude_regex: ""          # 按生效节点名排除候选，使用 Go 正则。留空即保留所有合格成员。
     min_mbps: 0                # 绝对带宽下限，单位 Mbps。0 关闭。可用于无历史时发现降速、筛除低于下限的已测候选。
-  - name: "🔞 WARP-SG"
+  - name: primary-group-2
     mode: chain
-    chain: "⛓️‍💥 SG-WARP"
-    direct: "🇸🇬 狮城节点"
-    geo_proxy: ""              # SG 默认跳过地区检查。
+    chain: dialer-proxy-2       # Mihomo 中设置 dialer-proxy: primary-group-2。
+    direct: direct-group-2
+    geo_proxy: ""              # 第二组默认跳过地区检查。
     expected_geo: ""
     strict_geo: false
     exclude_regex: ""
     min_mbps: 0
 
-  # 增加香港链式前置时，把名称换成实际对象名并取消以下条目的注释。
-  # - name: "🔞 WARP-HK"
+  # 增加第三条链式前置时，把名称换成实际对象名并取消以下条目的注释。
+  # - name: primary-group-3
   #   mode: chain
-  #   chain: "⛓️‍💥 HK-WARP"
-  #   direct: "🇭🇰 香港节点"
+  #   chain: dialer-proxy-3
+  #   direct: direct-group-3
 
-  # 只切台湾手动组时，在同一个 groups 列表中追加以下两行。
-  # - name: "🇹🇼 台湾节点"
+  # 只切一个额外手动组时，在同一个 groups 列表中追加以下两行。
+  # - name: optional-selector-group
   #   mode: selector

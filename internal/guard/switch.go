@@ -26,13 +26,13 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 	err := withSelectorLock(ctx, "apply", func() (applyErr error) {
 		current, err := r.Core.Proxy(ctx, group.Name)
 		if err != nil {
-			return fmt.Errorf("read %q: %w", group.Name, err)
+			return fmt.Errorf("read %s: %w", model.QuoteName(group.Name), err)
 		}
 		if current.Type != "Selector" {
-			return fmt.Errorf("%q is %s, want Selector", group.Name, current.Type)
+			return fmt.Errorf("%s is %s, want Selector", model.QuoteName(group.Name), current.Type)
 		}
 		if expectedCurrent != "" && current.Now != expectedCurrent {
-			return fmt.Errorf("%w: %q is now %q, expected %q", ErrManualOverride, group.Name, current.Now, expectedCurrent)
+			return fmt.Errorf("%w: %s is now %s, expected %s", ErrManualOverride, model.QuoteName(group.Name), model.QuoteName(current.Now), model.QuoteName(expectedCurrent))
 		}
 
 		original := current.Now
@@ -98,7 +98,7 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 				if group.GeoProxy != "" {
 					geo, geoErr := r.checkGeo(ctx, group)
 					if errors.Is(geoErr, probe.ErrRoute) {
-						return fmt.Errorf("prove live geo route for %q: %w", group.Name, geoErr)
+						return fmt.Errorf("prove live geo route for %s: %w", model.QuoteName(group.Name), geoErr)
 					}
 					if !geo.OK {
 						failures = append(failures, fmt.Sprintf("%s geo: %s", node, geoFailure(geo, geoErr)))
@@ -110,10 +110,10 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 				}
 				verified, readErr := r.Core.Proxy(ctx, group.Name)
 				if readErr != nil {
-					return fmt.Errorf("verify retained selection for %q: %w", group.Name, readErr)
+					return fmt.Errorf("verify retained selection for %s: %w", model.QuoteName(group.Name), readErr)
 				}
 				if verified.Now != original {
-					return fmt.Errorf("%w: %q changed from %q to %q during validation", ErrManualOverride, group.Name, original, verified.Now)
+					return fmt.Errorf("%w: %s changed from %s to %s during validation", ErrManualOverride, model.QuoteName(group.Name), model.QuoteName(original), model.QuoteName(verified.Now))
 				}
 				selected = original
 				committed = true
@@ -126,13 +126,13 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 			}
 			latest, readErr := r.Core.Proxy(ctx, group.Name)
 			if readErr != nil {
-				return fmt.Errorf("re-read %q: %w", group.Name, readErr)
+				return fmt.Errorf("re-read %s: %w", model.QuoteName(group.Name), readErr)
 			}
 			if latest.Now != ownedSelection {
-				return fmt.Errorf("%w: %q changed from %q to %q", ErrManualOverride, group.Name, ownedSelection, latest.Now)
+				return fmt.Errorf("%w: %s changed from %s to %s", ErrManualOverride, model.QuoteName(group.Name), model.QuoteName(ownedSelection), model.QuoteName(latest.Now))
 			}
 			if !contains(latest.All, node) {
-				return fmt.Errorf("%w: %q is no longer a member of %q", ErrManualOverride, node, group.Name)
+				return fmt.Errorf("%w: %s is no longer a member of %s", ErrManualOverride, model.QuoteName(node), model.QuoteName(group.Name))
 			}
 			if dialerErr := r.validateLiveDialer(ctx, group); dialerErr != nil {
 				return dialerErr
@@ -146,7 +146,7 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 				if observed, verifyErr := r.readSelectionAfterUncertainWrite(group.Name); verifyErr == nil && observed == node {
 					ownedSelection = node
 					r.closeConnectionsAfterUncertainWrite(group.Name, connections)
-					return fmt.Errorf("select %q response failed after controller applied it: %w", node, selectErr)
+					return fmt.Errorf("select %s response failed after controller applied it: %w", model.QuoteName(node), selectErr)
 				}
 				failures = append(failures, fmt.Sprintf("%s select: %v", node, selectErr))
 				continue
@@ -166,7 +166,7 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 			if group.GeoProxy != "" {
 				geo, geoErr := r.checkGeo(ctx, group)
 				if errors.Is(geoErr, probe.ErrRoute) {
-					return fmt.Errorf("prove live geo route for %q: %w", group.Name, geoErr)
+					return fmt.Errorf("prove live geo route for %s: %w", model.QuoteName(group.Name), geoErr)
 				}
 				if !geo.OK {
 					failures = append(failures, fmt.Sprintf("%s geo: %s", node, geoFailure(geo, geoErr)))
@@ -178,10 +178,10 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 			}
 			verified, readErr := r.Core.Proxy(ctx, group.Name)
 			if readErr != nil {
-				return fmt.Errorf("verify final selection for %q: %w", group.Name, readErr)
+				return fmt.Errorf("verify final selection for %s: %w", model.QuoteName(group.Name), readErr)
 			}
 			if verified.Now != ownedSelection {
-				return fmt.Errorf("%w: %q changed from %q to %q during validation", ErrManualOverride, group.Name, ownedSelection, verified.Now)
+				return fmt.Errorf("%w: %s changed from %s to %s during validation", ErrManualOverride, model.QuoteName(group.Name), model.QuoteName(ownedSelection), model.QuoteName(verified.Now))
 			}
 
 			selected = node
@@ -206,10 +206,10 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 			}
 			latest, readErr := r.Core.Proxy(ctx, group.Name)
 			if readErr != nil {
-				return fmt.Errorf("re-read fallback %q: %w", group.Name, readErr)
+				return fmt.Errorf("re-read fallback %s: %w", model.QuoteName(group.Name), readErr)
 			}
 			if latest.Now != ownedSelection {
-				return fmt.Errorf("%w: %q changed from %q to %q", ErrManualOverride, group.Name, ownedSelection, latest.Now)
+				return fmt.Errorf("%w: %s changed from %s to %s", ErrManualOverride, model.QuoteName(group.Name), model.QuoteName(ownedSelection), model.QuoteName(latest.Now))
 			}
 			if latest.Now != firstLive {
 				if dialerErr := r.validateLiveDialer(ctx, group); dialerErr != nil {
@@ -224,9 +224,9 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 					if observed, verifyErr := r.readSelectionAfterUncertainWrite(group.Name); verifyErr == nil && observed == firstLive {
 						ownedSelection = firstLive
 						r.closeConnectionsAfterUncertainWrite(group.Name, connections)
-						return fmt.Errorf("fallback select %q response failed after controller applied it: %w", firstLive, selectErr)
+						return fmt.Errorf("fallback select %s response failed after controller applied it: %w", model.QuoteName(firstLive), selectErr)
 					}
-					return fmt.Errorf("select live fallback %q: %w", firstLive, selectErr)
+					return fmt.Errorf("select live fallback %s: %w", model.QuoteName(firstLive), selectErr)
 				}
 				ownedSelection = firstLive
 				if cleanupErr := r.Core.CloseConnections(ctx, connections); cleanupErr != nil {
@@ -235,10 +235,10 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 			}
 			verified, verifyErr := r.Core.Proxy(ctx, group.Name)
 			if verifyErr != nil {
-				return fmt.Errorf("verify fallback selection for %q: %w", group.Name, verifyErr)
+				return fmt.Errorf("verify fallback selection for %s: %w", model.QuoteName(group.Name), verifyErr)
 			}
 			if verified.Now != firstLive {
-				return fmt.Errorf("%w: %q changed to %q during fallback validation", ErrManualOverride, group.Name, verified.Now)
+				return fmt.Errorf("%w: %s changed to %s during fallback validation", ErrManualOverride, model.QuoteName(group.Name), model.QuoteName(verified.Now))
 			}
 			selected = firstLive
 			detail := "Google 地区校验未通过，采用首个链路可用候选"
@@ -274,13 +274,13 @@ func (r *Runner) mirrorDirect(ctx context.Context, group config.Group, expected,
 		return false, err
 	}
 	if direct.Type != "Selector" {
-		return false, fmt.Errorf("%q is %s, want Selector", group.Direct, direct.Type)
+		return false, fmt.Errorf("%s is %s, want Selector", model.QuoteName(group.Direct), direct.Type)
 	}
 	if direct.Now != expected {
-		return false, fmt.Errorf("%w: %q is now %q, expected %q", ErrManualOverride, group.Direct, direct.Now, expected)
+		return false, fmt.Errorf("%w: %s is now %s, expected %s", ErrManualOverride, model.QuoteName(group.Direct), model.QuoteName(direct.Now), model.QuoteName(expected))
 	}
 	if !contains(direct.All, node) {
-		return false, fmt.Errorf("%q is not a member of %q", node, group.Direct)
+		return false, fmt.Errorf("%s is not a member of %s", model.QuoteName(node), model.QuoteName(group.Direct))
 	}
 	if err := r.Core.Select(ctx, group.Direct, node); err != nil {
 		return false, err
@@ -290,7 +290,7 @@ func (r *Runner) mirrorDirect(ctx context.Context, group config.Group, expected,
 		return false, err
 	}
 	if verified.Now != node {
-		return false, fmt.Errorf("%q readback is %q after selecting %q", group.Direct, verified.Now, node)
+		return false, fmt.Errorf("%s readback is %s after selecting %s", model.QuoteName(group.Direct), model.QuoteName(verified.Now), model.QuoteName(node))
 	}
 	return true, nil
 }
@@ -300,7 +300,7 @@ func (r *Runner) rollbackSelection(group config.Group, original, owned string) e
 	defer cancel()
 	latest, err := r.Core.Proxy(rollbackContext, group.Name)
 	if err != nil {
-		return fmt.Errorf("cannot verify rollback ownership for %q: %w", group.Name, err)
+		return fmt.Errorf("cannot verify rollback ownership for %s: %w", model.QuoteName(group.Name), err)
 	}
 	if latest.Now != owned {
 		return nil
@@ -315,7 +315,7 @@ func (r *Runner) rollbackSelection(group config.Group, original, owned string) e
 	if selectErr := r.Core.Select(rollbackContext, group.Name, original); selectErr != nil {
 		observed, readErr := r.Core.Proxy(rollbackContext, group.Name)
 		if readErr != nil || observed.Now != original {
-			return errors.Join(fmt.Errorf("rollback %q to %q: %w", group.Name, original, selectErr), readErr)
+			return errors.Join(fmt.Errorf("rollback %s to %s: %w", model.QuoteName(group.Name), model.QuoteName(original), selectErr), readErr)
 		}
 	}
 	if err := r.Core.CloseConnections(rollbackContext, connections); err != nil {
@@ -323,10 +323,10 @@ func (r *Runner) rollbackSelection(group config.Group, original, owned string) e
 	}
 	verified, err := r.Core.Proxy(rollbackContext, group.Name)
 	if err != nil {
-		return fmt.Errorf("verify rollback of %q: %w", group.Name, err)
+		return fmt.Errorf("verify rollback of %s: %w", model.QuoteName(group.Name), err)
 	}
 	if verified.Now != original {
-		return fmt.Errorf("rollback readback for %q is %q, want %q", group.Name, verified.Now, original)
+		return fmt.Errorf("rollback readback for %s is %s, want %s", model.QuoteName(group.Name), model.QuoteName(verified.Now), model.QuoteName(original))
 	}
 	return nil
 }
@@ -334,10 +334,10 @@ func (r *Runner) rollbackSelection(group config.Group, original, owned string) e
 func (r *Runner) restoreOriginal(ctx context.Context, group config.Group, original, owned string) error {
 	latest, err := r.Core.Proxy(ctx, group.Name)
 	if err != nil {
-		return fmt.Errorf("verify ownership before retaining %q: %w", original, err)
+		return fmt.Errorf("verify ownership before retaining %s: %w", model.QuoteName(original), err)
 	}
 	if latest.Now != owned {
-		return fmt.Errorf("%w: %q changed from %q to %q", ErrManualOverride, group.Name, owned, latest.Now)
+		return fmt.Errorf("%w: %s changed from %s to %s", ErrManualOverride, model.QuoteName(group.Name), model.QuoteName(owned), model.QuoteName(latest.Now))
 	}
 	if err := r.validateLiveDialer(ctx, group); err != nil {
 		return err
@@ -347,17 +347,17 @@ func (r *Runner) restoreOriginal(ctx context.Context, group config.Group, origin
 		r.logWarn("snapshot connections before retaining original failed", "group", group.Name, "node", owned, "error", snapshotErr)
 	}
 	if err := r.Core.Select(ctx, group.Name, original); err != nil {
-		return fmt.Errorf("restore retained original %q: %w", original, err)
+		return fmt.Errorf("restore retained original %s: %w", model.QuoteName(original), err)
 	}
 	if err := r.Core.CloseConnections(ctx, connections); err != nil {
 		r.logWarn("cleanup after retaining original failed", "group", group.Name, "error", err)
 	}
 	verified, err := r.Core.Proxy(ctx, group.Name)
 	if err != nil {
-		return fmt.Errorf("verify retained original %q: %w", original, err)
+		return fmt.Errorf("verify retained original %s: %w", model.QuoteName(original), err)
 	}
 	if verified.Now != original {
-		return fmt.Errorf("retained original readback is %q, want %q", verified.Now, original)
+		return fmt.Errorf("retained original readback is %s, want %s", model.QuoteName(verified.Now), model.QuoteName(original))
 	}
 	return nil
 }
@@ -368,10 +368,10 @@ func (r *Runner) validateLiveDialer(ctx context.Context, group config.Group) err
 	}
 	chain, err := r.Core.Proxy(ctx, group.Chain)
 	if err != nil {
-		return fmt.Errorf("read live chain %q before changing %q: %w", group.Chain, group.Name, err)
+		return fmt.Errorf("read live chain %s before changing %s: %w", model.QuoteName(group.Chain), model.QuoteName(group.Name), err)
 	}
 	if chain.Dialer != group.Name {
-		return fmt.Errorf("live chain %q uses dialer-proxy %q, refusing to change %q", group.Chain, chain.Dialer, group.Name)
+		return fmt.Errorf("live chain %s uses dialer-proxy %s, refusing to change %s", model.QuoteName(group.Chain), model.QuoteName(chain.Dialer), model.QuoteName(group.Name))
 	}
 	return nil
 }
