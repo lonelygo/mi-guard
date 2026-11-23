@@ -5,9 +5,9 @@ class MiGuard < Formula
 
   # BEGIN HOMEBREW_STABLE_METADATA
   stable do
-    url "https://github.com/lonelygo/mi-guard/releases/download/v0.1.1/mi-guard-0.1.1-darwin-arm64.tar.gz"
-    version "0.1.1"
-    sha256 "4692339a56f822492670e51cdbdc375f7837bd5ab85616b16a35ea54fc85acd4"
+    url "https://github.com/lonelygo/mi-guard/releases/download/v0.1.2/mi-guard-0.1.2-darwin-arm64.tar.gz"
+    version "0.1.2"
+    sha256 "a1405cbf206fb079f0664038077d6e1e568c4ef760025a5bcd1ced7322556d6a"
     depends_on arch: :arm64
   end
   # END HOMEBREW_STABLE_METADATA
