@@ -1,6 +1,6 @@
 # mi-guard
 
-<img src="deploy/macos/AppIcon.png" width="96" height="96" alt="mi-guard 通知助手图标">
+<img src="https://raw.githubusercontent.com/lonelygo/mi-guard/main/deploy/macos/AppIcon.png" width="96" height="96" alt="mi-guard 通知助手图标">
 
 `mihomo-guard` 是运行在 macOS 上的带宽选线守护进程。默认配置为 US 和 SG 两条 WARP 链维护前置节点。也可以让它直接管理普通的手动选择组，在当前线路持续降速或断线时为该组选线。手动 `bench` 可临时测试其他地区或新的机场订阅。
 
@@ -23,10 +23,10 @@ Homebrew 把 `mihomo-guard` 链接到自己的 `bin`，同一版本的通知助�
 | 文件 | 用法 |
 | --- | --- |
 | `~/.config/mihomo-guard/mihomo-guard.yaml` | 你实际编辑的 guard 配置。首次用 `mihomo-guard init` 创建，已有文件会保留。Homebrew 登录服务读取此路径，命令行可用 `-c /path/to/guard.yaml` 指定其他文件。 |
-| `share/mi-guard/mihomo-guard-default.yaml` | 当前版本的完整默认值、单位、字段说明和 HK/TW 配置示例。内容与该版本 `init` 生成的文件逐字节相同。升级后可用它对照自己的配置。 |
-| `share/mi-guard/mihomo-overlay.yaml` | Mihomo 的接线示例。将其中的条目手动并入生效的 Mihomo 配置，再重新加载。 |
+| [share/mi-guard/mihomo-guard-default.yaml](share/mi-guard/mihomo-guard-default.yaml) | 当前版本的完整默认值、单位、字段说明和 HK/TW 配置示例。内容与该版本 `init` 生成的文件逐字节相同。升级后可用它对照自己的配置。 |
+| [share/mi-guard/mihomo-overlay.yaml](share/mi-guard/mihomo-overlay.yaml) | Mihomo 的接线示例。将其中的条目手动并入生效的 Mihomo 配置，再重新加载。 |
 
-Homebrew 用户可以直接查看两份参考文件。源码安装的对应目录是 `~/.local/share/mi-guard/`，下载包则自带 `share/mi-guard/`。[默认配置原文](internal/config/mihomo-guard-default.yaml) · [接线示例原文](deploy/mihomo-overlay.yaml)
+从 v0.1.1 起，源码仓库和解压后的发布包都在顶层的 `share/mi-guard/` 提供这两份 YAML。`make install` 默认将它们复制到 `~/.local/share/mi-guard/`。Homebrew 用户可以用以下命令查看。
 
 ```sh
 less "$(brew --prefix mi-guard)/share/mi-guard/mihomo-guard-default.yaml"
@@ -140,9 +140,9 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.lonelygo.mi-g
 
 ## 验证与设计
 
-`make test` 运行 Go 竞态测试和静态检查。`make smoke` 通过本机稳定内核、临时控制器和回环测试服务器检查 CLI 的手动测速和切换。可用 `make smoke STABLE_CORE=/path/to/mihomo` 选择测试用核心。[现行设计](mihomo_guard_mac.md) · [实施计划](.omx/plans/implementation.md)
+`make test` 运行 Go 竞态测试和静态检查。`make smoke` 通过本机稳定内核、临时控制器和回环测试服务器检查 CLI 的手动测速和切换。可用 `make smoke STABLE_CORE=/path/to/mihomo` 选择测试用核心。[现行设计](https://github.com/lonelygo/mi-guard/blob/main/mihomo_guard_mac.md) · [实施计划](https://github.com/lonelygo/mi-guard/blob/main/.omx/plans/implementation.md)
 
-维护者在 `main` 上推送带发布说明的 `vX.Y.Z` 标签后，GitHub Actions 会测试并打包、发布归档和校验文件、更新 tap，再从公开的 tap 安装并运行 `brew test`。[发布工作流](.github/workflows/release.yml)
+维护者在 `main` 上推送带发布说明的 `vX.Y.Z` 标签后，GitHub Actions 会测试并打包、发布归档和校验文件、更新 tap，再从公开的 tap 安装并运行 `brew test`。[发布工作流](https://github.com/lonelygo/mi-guard/blob/main/.github/workflows/release.yml)
 
 ## 致谢与许可证
 

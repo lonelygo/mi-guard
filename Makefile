@@ -51,8 +51,7 @@ install: macos
 	install -m 755 "$(BUILD_DIR)/mihomo-guard" "$(BINDIR)/mihomo-guard"
 	ditto "$(BUILD_DIR)/mi-guard.app" "$(APPDIR)/mi-guard.app"
 	install -m 644 "$(BUILD_DIR)/com.lonelygo.mi-guard.plist" "$(AGENTDIR)/com.lonelygo.mi-guard.plist"
-	install -m 644 internal/config/mihomo-guard-default.yaml "$(SHAREDIR)/mihomo-guard-default.yaml"
-	install -m 644 deploy/mihomo-overlay.yaml "$(SHAREDIR)/mihomo-overlay.yaml"
+	install -m 644 share/mi-guard/mihomo-guard-default.yaml share/mi-guard/mihomo-overlay.yaml "$(SHAREDIR)/"
 	@test -e "$(GUARD_CONFIG)" || "$(BINDIR)/mihomo-guard" init -c "$(GUARD_CONFIG)"
 
 package:

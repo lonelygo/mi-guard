@@ -1,7 +1,6 @@
 package config
 
 import (
-	_ "embed"
 	"errors"
 	"fmt"
 	"math"
@@ -12,11 +11,11 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/lonelygo/mi-guard/share"
 	"gopkg.in/yaml.v2"
 )
 
-//go:embed mihomo-guard-default.yaml
-var example []byte
+var example = []byte(share.DefaultConfig())
 
 func DefaultPath() string {
 	home, _ := os.UserHomeDir()

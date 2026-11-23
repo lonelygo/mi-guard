@@ -35,16 +35,20 @@ class MiGuard < Formula
 
       bin.install "build/mihomo-guard"
       libexec.install "build/mi-guard.app"
-      pkgshare.install "deploy/mihomo-overlay.yaml"
     else
       bin.install "bin/mihomo-guard"
       libexec.install "libexec/mi-guard.app"
-      pkgshare.install "share/mi-guard/mihomo-overlay.yaml"
     end
 
-    reference = pkgshare/"mihomo-guard-default.yaml"
-    system bin/"mihomo-guard", "init", "-c", reference
-    reference.chmod 0644
+    pkgshare.install "share/mi-guard/mihomo-overlay.yaml"
+    if !build.head? && version == Version.new("0.1.0")
+      # This archive contains its default YAML only in the executable.
+      reference = pkgshare/"mihomo-guard-default.yaml"
+      system bin/"mihomo-guard", "init", "-c", reference
+      reference.chmod 0644
+    else
+      pkgshare.install "share/mi-guard/mihomo-guard-default.yaml"
+    end
   end
 
   def caveats

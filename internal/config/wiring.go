@@ -72,7 +72,7 @@ func (f *CoreFile) checkListener(addr, target string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("need a loopback listener %s bound to %q in the serving Mihomo config (see deploy/mihomo-overlay.yaml)", addr, target)
+	return fmt.Errorf("need a loopback listener %s bound to %q in the serving Mihomo config (see share/mi-guard/mihomo-overlay.yaml)", addr, target)
 }
 func (f *CoreFile) CheckBench(core Core) error {
 	if err := f.checkListener(core.TestProxy, core.TestGroup); err != nil {
