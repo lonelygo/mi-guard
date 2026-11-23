@@ -106,6 +106,7 @@ def main() -> int:
         shutil.copyfile(build_dir / "mihomo-guard", cli)
         shutil.copytree(build_dir / "mi-guard.app", app)
         shutil.copyfile(repo / "deploy/mihomo-overlay.yaml", share / "mihomo-overlay.yaml")
+        shutil.copyfile(repo / "internal/config/mihomo-guard-default.yaml", share / "mihomo-guard-default.yaml")
         shutil.copyfile(repo / "LICENSE", package_root / "LICENSE")
         shutil.copyfile(repo / "README.md", package_root / "README.md")
 

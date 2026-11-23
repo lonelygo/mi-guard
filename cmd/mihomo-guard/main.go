@@ -1,4 +1,4 @@
-// Command mihomo-guard maintains bandwidth-aware upstream selectors for Mihomo.
+// Command mihomo-guard maintains bandwidth-aware managed selectors for Mihomo.
 package main
 
 import (
@@ -32,7 +32,7 @@ const usage = `mihomo-guard <command> [-c guard.yaml]
   status        Show current groups and accounted usage (--probe for fresh checks)
   bench         Measure managed groups, or use -g GROUP, --node NAME, -f REGEXP
                 --source FILE|URL measures an ad-hoc provider using the installed core
-                --apply explicitly applies results to managed upstream selectors
+                --apply explicitly applies results to managed selectors
   daemon        Run heartbeats, capped speed checks and failover
   notify-setup  Request macOS notification permission for the bundled helper
 `
@@ -106,7 +106,7 @@ func run(ctx context.Context, args []string) error {
 		fs.Var(&opt.sources, "source", "local or HTTP(S) provider YAML (repeatable)")
 		fs.BoolVar(&opt.apply, "apply", false, "apply the result to managed groups")
 	case "status":
-		fs.BoolVar(&live, "probe", false, "also probe chain liveness and configured geography")
+		fs.BoolVar(&live, "probe", false, "also probe managed live-path liveness and configured geography")
 	case "init", "check", "daemon", "notify-setup":
 	default:
 		return fmt.Errorf("unknown command %q\n%s", cmd, usage)
@@ -208,27 +208,15 @@ func run(ctx context.Context, args []string) error {
 			return fmt.Errorf("cannot verify live test listener for current member %q: %w", p.Now, err)
 		}
 		for _, g := range c.Groups {
-			primary, e := r.Core.Proxy(ctx, g.Name)
+			nodes, e := checkManagedGroup(ctx, r, g)
 			if e != nil {
 				return e
 			}
-			chain, e := r.Core.Proxy(ctx, g.Chain)
-			if e != nil {
-				return e
+			if g.Mode == config.GroupModeSelector {
+				fmt.Printf("%s: %d candidates\n", g.Name, len(nodes))
+			} else {
+				fmt.Printf("%s via %s: %d candidates\n", g.ProbeTarget(), g.Name, len(nodes))
 			}
-			if primary.Type != "Selector" || chain.Name != g.Chain || chain.Dialer != g.Name {
-				return fmt.Errorf("invalid live target %s", g.Name)
-			}
-			if g.GeoProxy != "" {
-				if err := r.CheckIngress(ctx, g.GeoProxy, c.Speed.GeoURL, g.Chain); err != nil {
-					return fmt.Errorf("cannot verify live geo listener for %q: %w", g.Chain, err)
-				}
-			}
-			nodes, e := r.Candidates(ctx, g.Name)
-			if e != nil {
-				return e
-			}
-			fmt.Printf("%s via %s: %d candidates\n", g.Chain, g.Name, len(nodes))
 		}
 		fmt.Printf("ready: Mihomo %s, %s (%d members)\n", v, p.Name, len(p.All))
 		return nil
@@ -258,7 +246,7 @@ func status(ctx context.Context, r *guard.Runner, live bool) error {
 	}
 	fmt.Printf("Mihomo %s | budget %d / %d bytes | %d bandwidth samples\n", v, s.UsedBytes, r.Cfg.Speed.MonthlyBytes, len(s.Samples))
 	out := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(out, "GROUP\tCURRENT\tMEMBERS\tCHAIN")
+	fmt.Fprintln(out, "GROUP\tCURRENT\tMEMBERS\tPROBE")
 	for _, g := range r.Cfg.Groups {
 		for _, name := range []string{g.Name, g.Direct} {
 			if name == "" {
@@ -271,7 +259,7 @@ func status(ctx context.Context, r *guard.Runner, live bool) error {
 			}
 			label := "-"
 			if name == g.Name {
-				label = g.Chain
+				label = g.ProbeTarget()
 			}
 			fmt.Fprintf(out, "%s\t%s\t%d\t%s\n", name, p.Now, len(p.All), label)
 		}
@@ -281,15 +269,16 @@ func status(ctx context.Context, r *guard.Runner, live bool) error {
 	}
 	if live {
 		for _, g := range r.Cfg.Groups {
-			ms, e := r.Core.Delay(ctx, g.Chain, r.Cfg.Speed.LivenessURL, r.Cfg.Schedule.HeartbeatTimeout)
+			target := g.ProbeTarget()
+			ms, e := r.Core.Delay(ctx, target, r.Cfg.Speed.LivenessURL, r.Cfg.Schedule.HeartbeatTimeout)
 			if e != nil {
-				fmt.Printf("%s heartbeat: %v\n", g.Chain, e)
+				fmt.Printf("%s heartbeat: %v\n", target, e)
 			} else {
-				fmt.Printf("%s heartbeat: %d ms\n", g.Chain, ms)
+				fmt.Printf("%s heartbeat: %d ms\n", target, ms)
 			}
 			if g.GeoProxy != "" {
 				geo, e := r.ExitStatus(ctx, g)
-				fmt.Printf("%s geo_ok=%t domain=%s ip=%s colo=%s loc=%s", g.Chain, geo.OK, geo.Domain, geo.IP, geo.Colo, geo.Loc)
+				fmt.Printf("%s geo_ok=%t domain=%s ip=%s colo=%s loc=%s", target, geo.OK, geo.Domain, geo.IP, geo.Colo, geo.Loc)
 				if e != nil {
 					fmt.Printf(" error=%v", e)
 				}
@@ -298,6 +287,32 @@ func status(ctx context.Context, r *guard.Runner, live bool) error {
 		}
 	}
 	return nil
+}
+
+func checkManagedGroup(ctx context.Context, r *guard.Runner, g config.Group) ([]string, error) {
+	primary, err := r.Core.Proxy(ctx, g.Name)
+	if err != nil {
+		return nil, err
+	}
+	if primary.Type != "Selector" {
+		return nil, fmt.Errorf("invalid live target %s: got %s, want Selector", g.Name, primary.Type)
+	}
+	if g.Mode != config.GroupModeSelector {
+		chain, chainErr := r.Core.Proxy(ctx, g.Chain)
+		if chainErr != nil {
+			return nil, chainErr
+		}
+		if chain.Name != g.Chain || chain.Dialer != g.Name {
+			return nil, fmt.Errorf("invalid live target %s", g.Name)
+		}
+	}
+	target := g.ProbeTarget()
+	if g.GeoProxy != "" {
+		if err := r.CheckIngress(ctx, g.GeoProxy, r.Cfg.Speed.GeoURL, target); err != nil {
+			return nil, fmt.Errorf("cannot verify live geo listener for %q: %w", target, err)
+		}
+	}
+	return r.Candidates(ctx, g.Name)
 }
 
 func bench(ctx context.Context, r *guard.Runner, o benchOptions) error {
@@ -325,7 +340,7 @@ func bench(ctx context.Context, r *guard.Runner, o benchOptions) error {
 	for _, group := range groups {
 		if o.apply {
 			if _, ok := r.Managed(group); !ok {
-				return fmt.Errorf("--apply requires a managed upstream group, got %q", group)
+				return fmt.Errorf("--apply requires a managed selector, got %q", group)
 			}
 			p, e := r.Core.Proxy(ctx, group)
 			if e != nil {
@@ -393,6 +408,7 @@ func bench(ctx context.Context, r *guard.Runner, o benchOptions) error {
 	}
 	return nil
 }
+
 func printResults(in []model.Sample) {
 	rows := slices.Clone(in)
 	slices.SortStableFunc(rows, func(a, b model.Sample) int {

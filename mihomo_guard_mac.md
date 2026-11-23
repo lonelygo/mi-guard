@@ -8,9 +8,12 @@
 | --- | --- | --- |
 | ⛓️‍💥 US-WARP | 🔞 WARP-US | 验证链路与 Google 地区，尝试让 🇺🇲 美国节点 跟随 |
 | ⛓️‍💥 SG-WARP | 🔞 WARP-SG | 验证链路，尝试让 🇸🇬 狮城节点 跟随 |
+| 独立手动组选路 | `mode: selector` 的 `name` | 只切该 select 组，用该组验证新连接的出口 |
 | 候选下载测试 | 独立的 mi-guard-bench | 本地监听器直接引用此组。前置下载样本按 provider 和生效节点名归档 |
 
 守护模式使用 ClashX Meta 正在服务的内核，`/version` 提供运行版本。已有 provider 的候选从控制器读取，保留主配置中的名字前缀与协议参数覆盖。临时手测新订阅时，显式的 `bench --source` 调用安装目录 `.private_core/` 里的内核，使用临时目录、回环端口和仅含源节点的配置。具体配置及安装见 [README](README.md)。
+
+US 和 SG 是默认配置中的两项。用户可以按同样的方式增加其他地区的链式前置，也可以用 `mode: selector` 单独维护普通手动选择组。各模式的必填项、地区监听绑定和完整示例见[随包默认配置](internal/config/mihomo-guard-default.yaml)。
 
 ## 从观测到切换
 

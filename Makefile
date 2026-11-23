@@ -1,6 +1,7 @@
 BINDIR ?= $(HOME)/.local/bin
 APPDIR ?= $(HOME)/Applications
 AGENTDIR ?= $(HOME)/Library/LaunchAgents
+SHAREDIR ?= $(BINDIR)/../share/mi-guard
 GUARD_CONFIG ?= $(HOME)/.config/mihomo-guard/mihomo-guard.yaml
 GUARD_LOG ?= $(HOME)/Library/Logs/mihomo-guard.log
 STABLE_CORE ?= $(HOME)/Library/Application Support/com.metacubex.ClashX.meta/.private_core/com.metacubex.ClashX.ProxyConfigHelper.meta
@@ -46,10 +47,12 @@ macos: cli app
 	plutil -lint "$(BUILD_DIR)/com.lonelygo.mi-guard.plist" "$(BUILD_DIR)/mi-guard.app/Contents/Info.plist"
 
 install: macos
-	mkdir -p "$(BINDIR)" "$(APPDIR)" "$(AGENTDIR)" "$$(dirname "$(GUARD_LOG)")"
+	mkdir -p "$(BINDIR)" "$(APPDIR)" "$(AGENTDIR)" "$(SHAREDIR)" "$$(dirname "$(GUARD_LOG)")"
 	install -m 755 "$(BUILD_DIR)/mihomo-guard" "$(BINDIR)/mihomo-guard"
 	ditto "$(BUILD_DIR)/mi-guard.app" "$(APPDIR)/mi-guard.app"
 	install -m 644 "$(BUILD_DIR)/com.lonelygo.mi-guard.plist" "$(AGENTDIR)/com.lonelygo.mi-guard.plist"
+	install -m 644 internal/config/mihomo-guard-default.yaml "$(SHAREDIR)/mihomo-guard-default.yaml"
+	install -m 644 deploy/mihomo-overlay.yaml "$(SHAREDIR)/mihomo-overlay.yaml"
 	@test -e "$(GUARD_CONFIG)" || "$(BINDIR)/mihomo-guard" init -c "$(GUARD_CONFIG)"
 
 package:

@@ -1,9 +1,12 @@
-# 合并条目到正在使用的 Mihomo 配置的同名列表中。
-# 测速组仅供本地监听使用。业务 rules、代理组和 dialer-proxy 不应引用它。
+# 将以下条目手动并入当前 Mihomo 配置的 proxy-groups 和 listeners 列表，
+# 保留原有条目，再在 ClashX Meta 或所用客户端中重新加载配置。guard 安装时仅提供此示例。
+# 若客户端从订阅生成主配置，请在该客户端的持久覆写配置中维护这些条目。
+
 proxy-groups:
   - name: mi-guard-bench
     type: select
     hidden: true
+    # 换成实际加载的 provider 名。此测速组仅供下方专用监听使用。
     use:
       - vipuser_trojan
       - vipuser_reality
@@ -14,8 +17,10 @@ listeners:
     listen: 127.0.0.1
     port: 17987
     proxy: mi-guard-bench
+  # 下面这项供默认 US 组的 geo_proxy 使用，仅启用地区校验的组需要相应的监听。
+  # chain 模式绑定实际 chain 名，selector 模式绑定 name。地址、端口均与 geo_proxy 对齐。
   - name: mi-guard-us-exit
     type: mixed
     listen: 127.0.0.1
     port: 7898
-    proxy: ⛓️‍💥 US-WARP
+    proxy: "⛓️‍💥 US-WARP"

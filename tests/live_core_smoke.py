@@ -254,6 +254,20 @@ def select_proxy(port: int, secret: str, group: str, node: str) -> None:
     controller(port, secret, "PUT", f"/proxies/{escaped}", {"name": node})
 
 
+def request_through_proxy(proxy_port: int, origin_port: int, path: str = "/204") -> None:
+    connection = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=3)
+    try:
+        connection.request("GET", f"http://127.0.0.1:{origin_port}{path}")
+        response = connection.getresponse()
+        response.read()
+        if response.status != http.HTTPStatus.NO_CONTENT:
+            raise AssertionError(
+                f"route through listener {proxy_port} returned {response.status}"
+            )
+    finally:
+        connection.close()
+
+
 def wait_for_core(process: subprocess.Popen[bytes], port: int, secret: str, log: Path) -> None:
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
@@ -323,7 +337,12 @@ def run_recovery_daemon(
     config: Path,
     controller_port: int,
     secret: str,
-) -> tuple[str, str]:
+    target_group: str,
+    failed_node: str,
+    follower_group: str = "",
+    stable_groups: dict[str, str] | None = None,
+) -> str:
+    stable_groups = stable_groups or {}
     process = subprocess.Popen(
         [str(guard), "daemon", "-c", str(config)],
         stdout=subprocess.PIPE,
@@ -332,21 +351,39 @@ def run_recovery_daemon(
         text=True,
     )
     deadline = time.monotonic() + 6
-    recovered = ("", "")
+    recovered = ""
     while time.monotonic() < deadline:
         if process.poll() is not None:
             output, _ = process.communicate()
             raise AssertionError(f"recovery daemon exited before failover:\n{output}")
-        primary = selection(controller_port, secret, "Managed")
-        mirror = selection(controller_port, secret, "Mirror")
-        if primary != "Node Dead" and mirror == primary:
-            recovered = (primary, mirror)
+        current = selection(controller_port, secret, target_group)
+        follower = (
+            selection(controller_port, secret, follower_group) if follower_group else current
+        )
+        observed = {
+            group: selection(controller_port, secret, group) for group in stable_groups
+        }
+        changed = {
+            group: (expected, observed[group])
+            for group, expected in stable_groups.items()
+            if observed[group] != expected
+        }
+        if changed:
+            process.kill()
+            output, _ = process.communicate(timeout=2)
+            raise AssertionError(
+                f"recovery of {target_group!r} changed unrelated selectors {changed}:\n{output}"
+            )
+        if current != failed_node and follower == current:
+            recovered = current
             break
         time.sleep(0.04)
-    if not recovered[0]:
+    if not recovered:
         process.kill()
         output, _ = process.communicate(timeout=2)
-        raise AssertionError(f"daemon did not recover unreachable primary:\n{output}")
+        raise AssertionError(
+            f"daemon did not recover unreachable selector {target_group!r}:\n{output}"
+        )
     process.send_signal(signal.SIGINT)
     try:
         output, _ = process.communicate(timeout=5)
@@ -396,15 +433,20 @@ def write_core_config(
     controller_port: int,
     listener_port: int,
     stale_listener_port: int,
+    selector_listener_port: int,
+    chain_listener_port: int,
     secret: str,
     proxies: dict[str, int],
 ) -> None:
-    dead, slow, fast, manual, exit_proxy = (
+    dead, slow, fast, manual, exit_proxy, hk_dead, hk_slow, tw_fast = (
         proxies["Node Dead"],
         proxies["Node Slow"],
         proxies["Node Fast"],
         proxies["Node Manual"],
         proxies["Exit Proxy"],
+        proxies["HK Dead"],
+        proxies["HK Slow"],
+        proxies["TW Fast"],
     )
     provider_path = path.parent / "serving-provider.yaml"
     provider_path.write_text(
@@ -435,6 +477,24 @@ def write_core_config(
                         "server": "127.0.0.1",
                         "port": manual,
                     },
+                    {
+                        "name": "HK Dead",
+                        "type": "http",
+                        "server": "127.0.0.1",
+                        "port": hk_dead,
+                    },
+                    {
+                        "name": "HK Slow",
+                        "type": "http",
+                        "server": "127.0.0.1",
+                        "port": hk_slow,
+                    },
+                    {
+                        "name": "TW Fast",
+                        "type": "http",
+                        "server": "127.0.0.1",
+                        "port": tw_fast,
+                    },
                 ]
             }
         )
@@ -460,6 +520,7 @@ proxy-providers:
 proxy-groups:
   - {{name: Managed, type: select, use: [synthetic], filter: '^Node (Dead|Slow|Fast)$'}}
   - {{name: Mirror, type: select, use: [synthetic], filter: '^Node (Dead|Slow|Fast)$'}}
+  - {{name: 'HK/TW', type: select, use: [synthetic], filter: '^(HK Dead|HK Slow|TW Fast)$'}}
   - {{name: Other Region, type: select, use: [synthetic], filter: '^Node Manual$'}}
   - {{name: mi-guard-bench, type: select, use: [synthetic]}}
   - {{name: stale-live-bench, type: select, use: [synthetic]}}
@@ -474,6 +535,16 @@ listeners:
     listen: 127.0.0.1
     port: {stale_listener_port}
     proxy: stale-live-bench
+  - name: selector-route-listener
+    type: mixed
+    listen: 127.0.0.1
+    port: {selector_listener_port}
+    proxy: HK/TW
+  - name: legacy-chain-route-listener
+    type: mixed
+    listen: 127.0.0.1
+    port: {chain_listener_port}
+    proxy: Chain
 rules:
   - MATCH,DIRECT
 """
@@ -538,6 +609,9 @@ groups:
     chain: Chain
     direct: Mirror
     exclude_regex: "^$"
+  - name: HK/TW
+    mode: selector
+    exclude_regex: "^$"
 """
     )
 
@@ -556,6 +630,8 @@ def exercise(core: Path, guard: Path) -> None:
             "Node Slow": ProxyServer(("127.0.0.1", 0), "Node Slow", 0.004),
             "Node Fast": ProxyServer(("127.0.0.1", 0), "Node Fast", 0.0),
             "Node Manual": ProxyServer(("127.0.0.1", 0), "Node Manual", 0.0001),
+            "HK Slow": ProxyServer(("127.0.0.1", 0), "HK Slow", 0.004),
+            "TW Fast": ProxyServer(("127.0.0.1", 0), "TW Fast", 0.0),
             "Exit Proxy": ProxyServer(("127.0.0.1", 0), "Exit Proxy", 0.0),
         }
         servers: list[socketserver.BaseServer] = [origin, *proxy_servers.values()]
@@ -566,7 +642,10 @@ def exercise(core: Path, guard: Path) -> None:
             controller_port = free_port()
             listener_port = free_port()
             stale_listener_port = free_port()
+            selector_listener_port = free_port()
+            chain_listener_port = free_port()
             dead_port = free_port()
+            hk_dead_port = free_port()
             secret = "isolated-smoke-secret"
             core_config = scratch / "mihomo.yaml"
             guard_config = scratch / "mihomo-guard.yaml"
@@ -577,10 +656,13 @@ def exercise(core: Path, guard: Path) -> None:
                 controller_port,
                 listener_port,
                 stale_listener_port,
+                selector_listener_port,
+                chain_listener_port,
                 secret,
                 {
                     **{name: server.server_address[1] for name, server in proxy_servers.items()},
                     "Node Dead": dead_port,
+                    "HK Dead": hk_dead_port,
                 },
             )
             write_guard_config(
@@ -690,16 +772,25 @@ def exercise(core: Path, guard: Path) -> None:
                         )
                     select_proxy(controller_port, secret, "Managed", "Node Slow")
                     select_proxy(controller_port, secret, "Mirror", "Node Slow")
+                    select_proxy(controller_port, secret, "HK/TW", "HK Slow")
                     select_proxy(controller_port, secret, "mi-guard-bench", "Node Manual")
                     initial = {
                         name: selection(controller_port, secret, name)
-                        for name in ("Managed", "Mirror", "Other Region", "mi-guard-bench")
+                        for name in (
+                            "Managed",
+                            "Mirror",
+                            "HK/TW",
+                            "Other Region",
+                            "mi-guard-bench",
+                        )
                     }
 
-                    status = run_guard(guard, "status", "-c", str(guard_config))
-                    assert_names(status, "Managed", "Node Slow")
+                    status = run_guard(
+                        guard, "status", "-c", str(guard_config), "--probe"
+                    )
+                    assert_names(status, "Managed", "Node Slow", "HK/TW", "heartbeat")
                     checked = run_guard(guard, "check", "-c", str(guard_config))
-                    assert_names(checked, "ready:", "Chain", "Managed")
+                    assert_names(checked, "ready:", "Chain", "Managed", "HK/TW")
                     origin_before_stale_check = STATS.count("Origin /download")
                     stale = run_guard_failure(
                         guard, "check", "-c", str(stale_guard_config)
@@ -815,12 +906,70 @@ def exercise(core: Path, guard: Path) -> None:
                     final_status = run_guard(guard, "status", "-c", str(guard_config))
                     assert_names(final_status, "Managed", "Node Fast", "Mirror")
 
+                    selector_before = {
+                        name: selection(controller_port, secret, name)
+                        for name in (
+                            "Managed",
+                            "Mirror",
+                            "HK/TW",
+                            "Other Region",
+                            "mi-guard-bench",
+                        )
+                    }
+                    selector_applied = run_guard(
+                        guard,
+                        "bench",
+                        "-c",
+                        str(guard_config),
+                        "--group",
+                        "HK/TW",
+                        "--filter",
+                        "^(HK Slow|TW Fast)$",
+                        "--apply",
+                    )
+                    assert_names(selector_applied, "HK Slow", "TW Fast", "selected HK/TW")
+                    selector_final = {
+                        name: selection(controller_port, secret, name)
+                        for name in selector_before
+                    }
+                    selector_expected = dict(selector_before)
+                    selector_expected["HK/TW"] = "TW Fast"
+                    if selector_final != selector_expected:
+                        raise AssertionError(
+                            "standalone apply changed unrelated selectors: "
+                            f"{selector_before} -> {selector_final}\n{selector_applied}"
+                        )
+
+                    selector_hits = STATS.count("TW Fast")
+                    request_through_proxy(
+                        selector_listener_port, origin.server_address[1]
+                    )
+                    if STATS.count("TW Fast") <= selector_hits:
+                        raise AssertionError(
+                            "standalone production listener did not route through TW Fast"
+                        )
+
+                    chain_hits = {
+                        name: STATS.count(name) for name in ("Node Fast", "Exit Proxy")
+                    }
+                    request_through_proxy(chain_listener_port, origin.server_address[1])
+                    if any(STATS.count(name) <= count for name, count in chain_hits.items()):
+                        raise AssertionError(
+                            "legacy chain listener no longer traversed Node Fast and Exit Proxy"
+                        )
+
                     state = json.loads(history.read_text())
                     samples = state.get("samples", [])
                     if state.get("used_bytes", 0) <= 0 or not samples:
                         raise AssertionError(f"history did not record budget/samples: {state}")
                     measured = {sample.get("node") for sample in samples}
-                    if not {"Node Slow", "Node Fast", "Node Manual"}.issubset(measured):
+                    if not {
+                        "Node Slow",
+                        "Node Fast",
+                        "Node Manual",
+                        "HK Slow",
+                        "TW Fast",
+                    }.issubset(measured):
                         raise AssertionError(f"history missing measured nodes: {measured}")
 
                     quick = run_guard(
@@ -899,13 +1048,56 @@ def exercise(core: Path, guard: Path) -> None:
                             f"monthly_bytes: {recovery_state['used_bytes']}",
                         )
                     )
+
+                    select_proxy(controller_port, secret, "HK/TW", "HK Dead")
+                    selector_recovery_downloads = STATS.count("Origin /download")
+                    selector_recovered = run_recovery_daemon(
+                        guard,
+                        recovery_config,
+                        controller_port,
+                        secret,
+                        "HK/TW",
+                        "HK Dead",
+                        stable_groups={
+                            "Managed": "Node Fast",
+                            "Mirror": "Node Fast",
+                            "Other Region": "Node Manual",
+                            "mi-guard-bench": "Node Manual",
+                        },
+                    )
+                    if selector_recovered not in {"HK Slow", "TW Fast"}:
+                        raise AssertionError(
+                            "standalone selector recovered to unexpected node: "
+                            f"{selector_recovered}"
+                        )
+                    selector_recovered_state = json.loads(recovery_history.read_text())
+                    if "HK/TW" not in selector_recovered_state.get("heartbeats", {}):
+                        raise AssertionError(
+                            "standalone selector recovery did not record an HK/TW heartbeat"
+                        )
+                    if STATS.count("Origin /download") != selector_recovery_downloads:
+                        raise AssertionError(
+                            "standalone hard recovery downloaded speed-test data"
+                        )
+
                     select_proxy(controller_port, secret, "Managed", "Node Dead")
                     select_proxy(controller_port, secret, "Mirror", "Node Dead")
                     recovery_downloads = STATS.count("Origin /download")
                     recovered = run_recovery_daemon(
-                        guard, recovery_config, controller_port, secret
+                        guard,
+                        recovery_config,
+                        controller_port,
+                        secret,
+                        "Managed",
+                        "Node Dead",
+                        follower_group="Mirror",
+                        stable_groups={
+                            "HK/TW": selector_recovered,
+                            "Other Region": "Node Manual",
+                            "mi-guard-bench": "Node Manual",
+                        },
                     )
-                    if recovered[0] not in {"Node Slow", "Node Fast"} or recovered[1] != recovered[0]:
+                    if recovered not in {"Node Slow", "Node Fast"}:
                         raise AssertionError(f"daemon recovered to unexpected nodes: {recovered}")
                     recovered_state = json.loads(recovery_history.read_text())
                     if recovered_state.get("used_bytes") != recovery_state["used_bytes"]:
@@ -922,11 +1114,13 @@ def exercise(core: Path, guard: Path) -> None:
                                 "core_version": core_version,
                                 "initial": initial,
                                 "final": final,
+                                "selector_final": selector_final,
                                 "used_bytes": state["used_bytes"],
                                 "cancelled_bytes": cancelled_bytes,
                                 "quick_bytes": quick_state["used_bytes"],
                                 "stream_bytes": stream_state["used_bytes"],
-                                "recovered": recovered[0],
+                                "recovered": recovered,
+                                "selector_recovered": selector_recovered,
                                 "sample_count": len(samples),
                                 "proxy_requests": STATS.snapshot(),
                             },

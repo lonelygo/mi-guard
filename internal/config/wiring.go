@@ -126,21 +126,31 @@ func (f *CoreFile) CheckBench(core Core) error {
 }
 func (f *CoreFile) CheckManaged(gs []Group) error {
 	for _, g := range gs {
-		match := false
-		for _, p := range f.Proxies {
-			if p.Name == g.Chain && p.Dialer == g.Name {
-				match = true
-				break
-			}
-		}
-		if !match {
-			return fmt.Errorf("%q must use dialer-proxy %q in the serving config", g.Chain, g.Name)
+		if err := f.checkManagedTarget(g); err != nil {
+			return err
 		}
 		if g.GeoProxy != "" {
-			if err := f.checkListener(g.GeoProxy, g.Chain); err != nil {
+			if err := f.checkListener(g.GeoProxy, g.ProbeTarget()); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func (f *CoreFile) checkManagedTarget(g Group) error {
+	if g.Mode == GroupModeSelector {
+		for _, group := range f.Groups {
+			if group.Name == g.Name && group.Type == "select" {
+				return nil
+			}
+		}
+		return fmt.Errorf("group %q must be a select group in the serving config", g.Name)
+	}
+	for _, proxy := range f.Proxies {
+		if proxy.Name == g.Chain && proxy.Dialer == g.Name {
+			return nil
+		}
+	}
+	return fmt.Errorf("%q must use dialer-proxy %q in the serving config", g.Chain, g.Name)
 }

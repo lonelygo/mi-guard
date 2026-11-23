@@ -63,9 +63,16 @@ func (r *Runner) Candidates(ctx context.Context, group string) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
+	g, managed := r.Managed(group)
 	target, ok := all[group]
-	if !ok || target.All == nil {
+	if !ok {
 		return nil, fmt.Errorf("unknown proxy group %q", group)
+	}
+	if target.All == nil {
+		return nil, fmt.Errorf("proxy %q has no candidates", group)
+	}
+	if managed && target.Type != "Selector" {
+		return nil, fmt.Errorf("%q is %s, want Selector", group, target.Type)
 	}
 	bench, ok := all[r.Cfg.Mihomo.TestGroup]
 	if !ok || bench.Type != "Selector" {
@@ -80,7 +87,6 @@ func (r *Runner) Candidates(ctx context.Context, group string) ([]string, error)
 	for _, name := range bench.All {
 		allowed[name] = true
 	}
-	g, managed := r.Managed(group)
 	var exclude *regexp.Regexp
 	if managed && g.Exclude != "" {
 		exclude = regexp.MustCompile(g.Exclude)
@@ -238,7 +244,7 @@ func (r *Runner) checkGeo(ctx context.Context, g config.Group) (probe.GeoResult,
 	if r.geoCheck != nil {
 		return r.geoCheck(ctx, g)
 	}
-	return probe.GeoChecked(ctx, g.GeoProxy, r.Cfg.Speed.GeoURL, r.Cfg.Speed.TraceURL, g.ExpectedGeo, r.Cfg.Speed.Timeout, r.route(g.Chain))
+	return probe.GeoChecked(ctx, g.GeoProxy, r.Cfg.Speed.GeoURL, r.Cfg.Speed.TraceURL, g.ExpectedGeo, r.Cfg.Speed.Timeout, r.route(g.ProbeTarget()))
 }
 
 func (r *Runner) route(names ...string) probe.RouteCheck {

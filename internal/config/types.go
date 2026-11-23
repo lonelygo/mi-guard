@@ -4,6 +4,11 @@ import "time"
 
 const AutoNotificationHelper = "auto"
 
+const (
+	GroupModeChain    = "chain"
+	GroupModeSelector = "selector"
+)
+
 type Config struct {
 	Mihomo        Core          `yaml:"mihomo"`
 	Schedule      Schedule      `yaml:"schedule"`
@@ -64,6 +69,7 @@ type Notifications struct {
 }
 type Group struct {
 	Name        string  `yaml:"name"`
+	Mode        string  `yaml:"mode"`
 	Chain       string  `yaml:"chain"`
 	Direct      string  `yaml:"direct"`
 	GeoProxy    string  `yaml:"geo_proxy"`
@@ -71,4 +77,12 @@ type Group struct {
 	StrictGeo   bool    `yaml:"strict_geo"`
 	Exclude     string  `yaml:"exclude_regex"`
 	MinMbps     float64 `yaml:"min_mbps"`
+}
+
+// ProbeTarget is the live Mihomo route to verify after a selection.
+func (g Group) ProbeTarget() string {
+	if g.Mode == GroupModeSelector {
+		return g.Name
+	}
+	return g.Chain
 }

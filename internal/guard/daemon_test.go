@@ -40,6 +40,49 @@ func TestHeartbeatHardFailureRequiresTwoChecksAndBypassesPerformanceCooldown(t *
 	}
 }
 
+func TestStandaloneHeartbeatProbesSelectorAndRecoversWithoutChainState(t *testing.T) {
+	fixture, server := newControllerFixture(t)
+	fixture.failOnSelection["warp"] = "a"
+	runner := testRunner(t, fixture, server)
+	group := config.Group{Name: "warp", Mode: config.GroupModeSelector}
+	runner.Cfg.Groups = []config.Group{group}
+	runtime := &daemonRuntime{runner: runner, groups: map[string]*groupRuntime{"warp": {current: "a"}}}
+
+	if err := runner.Store.Record(context.Background(), model.Sample{At: time.Now(), Node: "b", Provider: "airport", Scope: "front", Kind: "sweep", Mbps: 80, Attempts: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.heartbeat(context.Background(), group); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.heartbeat(context.Background(), group); err != nil {
+		t.Fatal(err)
+	}
+	fixture.mu.Lock()
+	selected := fixture.proxies["warp"].Now
+	connectionReads := fixture.connectionReads
+	delayNames := append([]string(nil), fixture.delayNames...)
+	fixture.mu.Unlock()
+	if selected != "b" {
+		t.Fatalf("standalone recovery selected %q", selected)
+	}
+	if connectionReads != 0 {
+		t.Fatalf("standalone daemon read connections %d times", connectionReads)
+	}
+	for _, name := range delayNames {
+		if name == "" || name == "chain" {
+			t.Fatalf("standalone daemon probed %q: %v", name, delayNames)
+		}
+	}
+
+	snapshot, err := runner.Store.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Heartbeats) != 1 || snapshot.Heartbeats[0].Scope != "warp" || snapshot.Heartbeats[0].Attempts != 2 {
+		t.Fatalf("standalone heartbeat aggregate = %+v", snapshot.Heartbeats)
+	}
+}
+
 func TestScheduleAndCandidateHelpers(t *testing.T) {
 	now := time.Now()
 	samples := []model.Sample{

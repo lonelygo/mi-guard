@@ -41,12 +41,18 @@ class MiGuard < Formula
       libexec.install "libexec/mi-guard.app"
       pkgshare.install "share/mi-guard/mihomo-overlay.yaml"
     end
+
+    reference = pkgshare/"mihomo-guard-default.yaml"
+    system bin/"mihomo-guard", "init", "-c", reference
+    reference.chmod 0644
   end
 
   def caveats
     <<~EOS
       Run `mihomo-guard init` on first use, or reuse your existing
       ~/.config/mihomo-guard/mihomo-guard.yaml.
+      Read the defaults and examples for this version in
+        #{opt_pkgshare}/mihomo-guard-default.yaml
 
       Merge the proxy-groups and listeners in the following file into your
       active Mihomo configuration, then reload Mihomo.
@@ -76,7 +82,7 @@ class MiGuard < Formula
 
     config = testpath/"mihomo-guard.yaml"
     system bin/"mihomo-guard", "init", "-c", config
-    assert_match "helper: auto", config.read
+    assert_equal config.read, (pkgshare/"mihomo-guard-default.yaml").read
 
     overlay = pkgshare/"mihomo-overlay.yaml"
     assert_match "mi-guard-bench", overlay.read

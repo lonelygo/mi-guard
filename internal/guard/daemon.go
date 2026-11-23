@@ -101,11 +101,12 @@ func (d *daemonRuntime) heartbeat(ctx context.Context, group config.Group) error
 	}
 
 	started := time.Now()
-	delay, delayErr := d.runner.Core.Delay(ctx, group.Chain, d.runner.Cfg.Speed.LivenessURL, d.runner.Cfg.Schedule.HeartbeatTimeout)
+	probeTarget := group.ProbeTarget()
+	delay, delayErr := d.runner.Core.Delay(ctx, probeTarget, d.runner.Cfg.Speed.LivenessURL, d.runner.Cfg.Schedule.HeartbeatTimeout)
 	sample := model.Sample{
 		At:        time.Now().UTC(),
 		Node:      proxy.Now,
-		Scope:     group.Chain,
+		Scope:     probeTarget,
 		Kind:      "heartbeat",
 		ElapsedMS: time.Since(started).Milliseconds(),
 		LatencyMS: delay,
@@ -436,7 +437,7 @@ func (d *daemonRuntime) maybeGeoCheck(ctx context.Context, group config.Group, c
 		d.runner.logWarn("geo route proof failed", "group", group.Name, "error", geoErr)
 		return
 	}
-	sample := model.Sample{At: time.Now().UTC(), Node: current, Scope: group.Chain, Kind: "geo", Attempts: 1}
+	sample := model.Sample{At: time.Now().UTC(), Node: current, Scope: group.ProbeTarget(), Kind: "geo", Attempts: 1}
 	if !result.OK {
 		sample.Failures = 1
 		sample.Error = geoFailure(result, geoErr)

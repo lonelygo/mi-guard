@@ -15,7 +15,7 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-//go:embed defaults.yaml
+//go:embed mihomo-guard-default.yaml
 var example []byte
 
 func DefaultPath() string {
@@ -121,8 +121,20 @@ func (c Config) validate() error {
 	}
 	roles := map[string]bool{c.Mihomo.TestGroup: true}
 	for _, g := range c.Groups {
-		if g.Name == "" || g.Chain == "" || g.MinMbps < 0 || math.IsNaN(g.MinMbps) || math.IsInf(g.MinMbps, 0) {
+		if g.Name == "" || g.MinMbps < 0 || math.IsNaN(g.MinMbps) || math.IsInf(g.MinMbps, 0) {
 			return errors.New("invalid managed group")
+		}
+		switch g.Mode {
+		case "", GroupModeChain:
+			if g.Chain == "" {
+				return fmt.Errorf("group %q needs chain in chain mode (use mode: selector for a standalone select group)", g.Name)
+			}
+		case GroupModeSelector:
+			if g.Chain != "" || g.Direct != "" {
+				return fmt.Errorf("group %q in selector mode must omit chain and direct", g.Name)
+			}
+		default:
+			return fmt.Errorf("group %q has unknown mode %q (want chain or selector)", g.Name, g.Mode)
 		}
 		for _, name := range []string{g.Name, g.Chain, g.Direct} {
 			if name == "" {

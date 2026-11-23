@@ -2,7 +2,7 @@
 
 <img src="deploy/macos/AppIcon.png" width="96" height="96" alt="mi-guard 通知助手图标">
 
-`mihomo-guard` 是运行在 macOS 上的带宽选线守护进程。它为 US 和 SG 两条 WARP 链分别维护机场前置，在当前线路持续降速或断线时，通过 Mihomo 的外部控制器切换一个策略组。手动 `bench` 也可以临时测试其他地区或新的机场订阅。
+`mihomo-guard` 是运行在 macOS 上的带宽选线守护进程。默认配置为 US 和 SG 两条 WARP 链维护前置节点。也可以让它直接管理普通的手动选择组，在当前线路持续降速或断线时为该组选线。手动 `bench` 可临时测试其他地区或新的机场订阅。
 
 ## 通过 Homebrew 安装
 
@@ -18,24 +18,45 @@ Homebrew 把 `mihomo-guard` 链接到自己的 `bin`，同一版本的通知助�
 
 也可以从发布页下载 Apple Silicon 的 `.tar.gz` 和 `SHA256SUMS`，在下载目录运行 `shasum -a 256 -c SHA256SUMS`。解包后保留目录结构，运行包内的 `bin/mihomo-guard` 即可找到配套助手。[下载发布包](https://github.com/lonelygo/mi-guard/releases/latest)
 
-## 接入 Mihomo
+## 配置 guard 和接入 Mihomo
 
-`init` 仅创建缺失的 `~/.config/mihomo-guard/mihomo-guard.yaml`。该文件中的路径可用 `~/`，相对路径相对于配置文件。默认主配置为 `~/.config/clash.meta/mihomo-2026.yaml`。主配置中的 `vipuser_trojan` 和 `vipuser_reality` 已经指向 `proxy_providers/vipuser_trojan.yaml` 和 `proxy_providers/vipuser_reality.yaml`。guard 读取控制器中的生效节点名，包含 provider 的前缀。参数与单位见[配置模板](internal/config/defaults.yaml)。
+| 文件 | 用法 |
+| --- | --- |
+| `~/.config/mihomo-guard/mihomo-guard.yaml` | 你实际编辑的 guard 配置。首次用 `mihomo-guard init` 创建，已有文件会保留。Homebrew 登录服务读取此路径，命令行可用 `-c /path/to/guard.yaml` 指定其他文件。 |
+| `share/mi-guard/mihomo-guard-default.yaml` | 当前版本的完整默认值、单位、字段说明和 HK/TW 配置示例。内容与该版本 `init` 生成的文件逐字节相同。升级后可用它对照自己的配置。 |
+| `share/mi-guard/mihomo-overlay.yaml` | Mihomo 的接线示例。将其中的条目手动并入生效的 Mihomo 配置，再重新加载。 |
 
-用下面的命令查看随包安装的接线示例。把示例条目分别并入 Mihomo 主配置**现有的** `proxy-groups` 和 `listeners` 列表，再在 ClashX Meta 中重新加载配置。[仓库中的接线示例](deploy/mihomo-overlay.yaml)
+Homebrew 用户可以直接查看两份参考文件。源码安装的对应目录是 `~/.local/share/mi-guard/`，下载包则自带 `share/mi-guard/`。[默认配置原文](internal/config/mihomo-guard-default.yaml) · [接线示例原文](deploy/mihomo-overlay.yaml)
 
 ```sh
-cat "$(brew --prefix mi-guard)/share/mi-guard/mihomo-overlay.yaml"
+less "$(brew --prefix mi-guard)/share/mi-guard/mihomo-guard-default.yaml"
+cat  "$(brew --prefix mi-guard)/share/mi-guard/mihomo-overlay.yaml"
 ```
 
-独立测速组的本地入口默认为 `127.0.0.1:17987`。Google 地区校验使用另一个绑定 US-WARP 的端口 `127.0.0.1:7898`。请保持测速组专用于该监听器，业务规则和链的 `dialer-proxy` 继续使用原有业务组。如果只做临时订阅测试，可直接使用下文的 `--source` 命令。
+在 guard 配置中，`mihomo.config_path` 指向正在使用的 Mihomo 主配置，`mihomo.stable_binary` 指向 `bench --source` 启动的独立内核。在线守护连接 `mihomo.controller` 指定的现有内核。文件路径支持 `~/`，相对路径以 guard 配置所在目录为基准。
+
+在 **Mihomo 主配置**中，把接线示例的策略组和监听器分别加入现有的 `proxy-groups`、`listeners` 列表，并将 `use` 改为实际的 provider 名称。若主配置由订阅工具生成，请把这些条目维护在工具的持久覆写配置里。默认测速监听为 `127.0.0.1:17987`，测速组专供该监听器使用。第二个监听 `127.0.0.1:7898` 用于 US 的地区校验，仅已配置 `geo_proxy` 的组需要对应的出口监听。
 
 ```sh
 mihomo-guard status
 mihomo-guard check
 ```
 
-`status` 显示运行中内核的版本、四个选择器、账期用量及样本数。`status --probe` 还会实际检查 WARP 链路，显示启用地区校验的域名和 Cloudflare IP/colo/loc。`check` 检查配置文件的监听绑定、WARP 前置引用和在线组成员，并建立不下载响应体的代理隧道，通过在线连接表核对真实路径。控制器地址或端口变化时，在 guard 配置中同步修改。默认复用主配置的 secret，也可以在 guard 配置中指定。所有子命令均支持 `-c /path/to/mihomo-guard.yaml`。
+`check` 核对生效的监听绑定、纳管组、链式前置引用和测速路径。`status` 显示当前组选择、账期用量及样本数，`status --probe` 还会检查实际链路或选择组，并显示已启用的地区校验结果。
+
+### 增加地区或只管理一个手动选择组
+
+在 guard 的现有 `groups:` 列表追加条目，名称使用 Mihomo 中的完整名称。下面的 HK 条目管理链式前置，TW 条目只切换指定的 `type: select` 组。候选节点需要同时属于该组和专用测速组。
+
+```yaml
+  - name: "🔞 WARP-HK"
+    mode: chain
+    chain: "⛓️‍💥 HK-WARP"
+  - name: "🇹🇼 台湾节点"
+    mode: selector
+```
+
+`groups` 按整个列表替换默认值。希望继续管理 US、SG 时保留原有两项。v0.1.0 配置省略 `mode` 时仍按 `chain` 处理。若今后只想管理原来的 `🇺🇲 美国节点`，可将整个 US 条目换成 `name: "🇺🇲 美国节点"` 和 `mode: selector`。新增的普通组可以先用 `mihomo-guard bench -g '🇹🇼 台湾节点'` 只看测速结果，再用同一命令加 `--apply` 应用选择。
 
 ## 手动测速
 
@@ -58,7 +79,7 @@ mihomo-guard bench --source 'https://example.org/subscription' --filter 'US'
 mihomo-guard bench -g '🔞 WARP-US' --apply
 ```
 
-无参数的 `bench` 测两个纳管组。在线模式从独立测速组可达的物理成员中选取候选，可以在接线示例的 `use` 列表加入其他已加载的 provider。每次只选一个测速节点，下载后恢复测速组原选择。每条下载连接在发出请求前，都通过运行中内核的连接表核对实际 selector 和节点，接线错误会中止本轮。默认只输出结果、保存历史及计费，显式 `--apply` 会执行业务组切换。手动指定地区、节点或正则时使用自己的实际名称。
+无参数的 `bench` 测 `groups` 中的所有纳管组。在线模式从独立测速组可达的物理成员中选取候选，可以在接线示例的 `use` 列表加入其他已加载的 provider。每次只选一个测速节点，下载后恢复测速组原选择。每条下载连接在发出请求前，都通过运行中内核的连接表核对实际 selector 和节点，接线错误会中止本轮。默认只输出结果、保存历史及计费，显式 `--apply` 会执行业务组切换。手动指定地区、节点或正则时使用自己的实际名称。
 
 `--source` 接受带顶层 `proxies` 列表的 Mihomo YAML，可重复使用。它用配置中的 `stable_binary` 启动临时核心，默认路径为 `~/Library/Application Support/com.metacubex.ClashX.meta/.private_core/com.metacubex.ClashX.ProxyConfigHelper.meta`。临时核心关闭 TUN，通过临时回环监听和独立 selector 串行测速，退出后回收进程和临时文件。独立模式会核对启动后的版本，默认要求正式版。需要试验 alpha 时可显式设置 `mihomo.allow_prerelease: true`。两个模式共享同一个 guard 配置的账期预算。若系统级 TUN 接管其他进程流量，使用独立实例测试前应确认该核心进程到机场服务器的连接直出，或采用在线测速组。
 

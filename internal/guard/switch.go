@@ -14,9 +14,9 @@ import (
 
 var ErrManualOverride = errors.New("proxy selection changed outside mihomo-guard")
 
-// Apply changes the WARP dialer selector, validates the resulting chain, then
-// mirrors the choice to the direct selector when configured. Every write is
-// preceded by a fresh read so an operator's concurrent selection wins.
+// Apply changes a managed selector, validates its configured live path, then
+// mirrors legacy chain-mode choices to the direct selector when configured.
+// Every write is preceded by a fresh read so an operator's concurrent choice wins.
 func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent string, ranked []model.Sample) (string, error) {
 	if len(ranked) == 0 {
 		return "", errors.New("no ranked candidates")
@@ -37,7 +37,7 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 
 		original := current.Now
 		directExpected := ""
-		if r.Cfg.Selection.SyncDirect && group.Direct != "" {
+		if group.Mode != config.GroupModeSelector && r.Cfg.Selection.SyncDirect && group.Direct != "" {
 			if direct, readErr := r.Core.Proxy(ctx, group.Direct); readErr == nil {
 				directExpected = direct.Now
 			}
@@ -50,7 +50,7 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 				applyErr = errors.Join(applyErr, r.rollbackSelection(group, original, ownedSelection))
 			}
 		}()
-		var firstChainLive string
+		var firstLive string
 		var failures []string
 		seen := make(map[string]struct{}, len(ranked))
 		for _, result := range ranked {
@@ -62,6 +62,21 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 				continue
 			}
 			seen[node] = struct{}{}
+			if !contains(current.All, node) {
+				failures = append(failures, fmt.Sprintf("%s is not a member of %s", node, group.Name))
+				continue
+			}
+			if group.Mode == config.GroupModeSelector {
+				candidate, candidateErr := r.Core.Proxy(ctx, node)
+				if candidateErr != nil {
+					failures = append(failures, fmt.Sprintf("%s read: %v", node, candidateErr))
+					continue
+				}
+				if !physical(candidate) {
+					failures = append(failures, fmt.Sprintf("%s is not a physical proxy", node))
+					continue
+				}
+			}
 			if group.MinMbps > 0 && result.Mbps > 0 && result.Mbps < group.MinMbps {
 				failures = append(failures, fmt.Sprintf("%s below %.1f Mbps", node, group.MinMbps))
 				continue
@@ -73,12 +88,12 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 					}
 					ownedSelection = original
 				}
-				if _, chainErr := r.Core.Delay(ctx, group.Chain, r.Cfg.Speed.LivenessURL, r.Cfg.Schedule.HeartbeatTimeout); chainErr != nil {
-					failures = append(failures, fmt.Sprintf("%s chain: %v", node, chainErr))
+				if _, chainErr := r.Core.Delay(ctx, group.ProbeTarget(), r.Cfg.Speed.LivenessURL, r.Cfg.Schedule.HeartbeatTimeout); chainErr != nil {
+					failures = append(failures, fmt.Sprintf("%s live path: %v", node, chainErr))
 					continue
 				}
-				if firstChainLive == "" {
-					firstChainLive = node
+				if firstLive == "" {
+					firstLive = node
 				}
 				if group.GeoProxy != "" {
 					geo, geoErr := r.checkGeo(ctx, group)
@@ -116,11 +131,14 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 			if latest.Now != ownedSelection {
 				return fmt.Errorf("%w: %q changed from %q to %q", ErrManualOverride, group.Name, ownedSelection, latest.Now)
 			}
+			if !contains(latest.All, node) {
+				return fmt.Errorf("%w: %q is no longer a member of %q", ErrManualOverride, node, group.Name)
+			}
 			if dialerErr := r.validateLiveDialer(ctx, group); dialerErr != nil {
 				return dialerErr
 			}
 			previous := ownedSelection
-			connections, snapshotErr := r.Core.ChainConnections(ctx, group.Chain, group.Name, previous)
+			connections, snapshotErr := r.selectionConnections(ctx, group, previous)
 			if snapshotErr != nil {
 				r.logWarn("snapshot chain connections failed", "group", group.Name, "node", previous, "error", snapshotErr)
 			}
@@ -138,12 +156,12 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 				r.logWarn("connection cleanup failed", "group", group.Name, "node", node, "error", cleanupErr)
 			}
 
-			if _, chainErr := r.Core.Delay(ctx, group.Chain, r.Cfg.Speed.LivenessURL, r.Cfg.Schedule.HeartbeatTimeout); chainErr != nil {
-				failures = append(failures, fmt.Sprintf("%s chain: %v", node, chainErr))
+			if _, chainErr := r.Core.Delay(ctx, group.ProbeTarget(), r.Cfg.Speed.LivenessURL, r.Cfg.Schedule.HeartbeatTimeout); chainErr != nil {
+				failures = append(failures, fmt.Sprintf("%s live path: %v", node, chainErr))
 				continue
 			}
-			if firstChainLive == "" {
-				firstChainLive = node
+			if firstLive == "" {
+				firstLive = node
 			}
 			if group.GeoProxy != "" {
 				geo, geoErr := r.checkGeo(ctx, group)
@@ -180,8 +198,8 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 			return nil
 		}
 
-		if !group.StrictGeo && firstChainLive != "" {
-			if firstChainLive == original {
+		if !group.StrictGeo && firstLive != "" {
+			if firstLive == original {
 				selected = original
 				committed = true
 				return nil
@@ -193,46 +211,46 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 			if latest.Now != ownedSelection {
 				return fmt.Errorf("%w: %q changed from %q to %q", ErrManualOverride, group.Name, ownedSelection, latest.Now)
 			}
-			if latest.Now != firstChainLive {
+			if latest.Now != firstLive {
 				if dialerErr := r.validateLiveDialer(ctx, group); dialerErr != nil {
 					return dialerErr
 				}
 				previous := latest.Now
-				connections, snapshotErr := r.Core.ChainConnections(ctx, group.Chain, group.Name, previous)
+				connections, snapshotErr := r.selectionConnections(ctx, group, previous)
 				if snapshotErr != nil {
 					r.logWarn("snapshot fallback connections failed", "group", group.Name, "node", previous, "error", snapshotErr)
 				}
-				if selectErr := r.Core.Select(ctx, group.Name, firstChainLive); selectErr != nil {
-					if observed, verifyErr := r.readSelectionAfterUncertainWrite(group.Name); verifyErr == nil && observed == firstChainLive {
-						ownedSelection = firstChainLive
+				if selectErr := r.Core.Select(ctx, group.Name, firstLive); selectErr != nil {
+					if observed, verifyErr := r.readSelectionAfterUncertainWrite(group.Name); verifyErr == nil && observed == firstLive {
+						ownedSelection = firstLive
 						r.closeConnectionsAfterUncertainWrite(group.Name, connections)
-						return fmt.Errorf("fallback select %q response failed after controller applied it: %w", firstChainLive, selectErr)
+						return fmt.Errorf("fallback select %q response failed after controller applied it: %w", firstLive, selectErr)
 					}
-					return fmt.Errorf("select live fallback %q: %w", firstChainLive, selectErr)
+					return fmt.Errorf("select live fallback %q: %w", firstLive, selectErr)
 				}
-				ownedSelection = firstChainLive
+				ownedSelection = firstLive
 				if cleanupErr := r.Core.CloseConnections(ctx, connections); cleanupErr != nil {
-					r.logWarn("fallback connection cleanup failed", "group", group.Name, "node", firstChainLive, "error", cleanupErr)
+					r.logWarn("fallback connection cleanup failed", "group", group.Name, "node", firstLive, "error", cleanupErr)
 				}
 			}
 			verified, verifyErr := r.Core.Proxy(ctx, group.Name)
 			if verifyErr != nil {
 				return fmt.Errorf("verify fallback selection for %q: %w", group.Name, verifyErr)
 			}
-			if verified.Now != firstChainLive {
+			if verified.Now != firstLive {
 				return fmt.Errorf("%w: %q changed to %q during fallback validation", ErrManualOverride, group.Name, verified.Now)
 			}
-			selected = firstChainLive
+			selected = firstLive
 			detail := "Google 地区校验未通过，采用首个链路可用候选"
-			followed, mirrorErr := r.mirrorDirect(ctx, group, directExpected, firstChainLive)
+			followed, mirrorErr := r.mirrorDirect(ctx, group, directExpected, firstLive)
 			if mirrorErr != nil {
-				r.logWarn("direct group follow failed", "group", group.Direct, "node", firstChainLive, "error", mirrorErr)
+				r.logWarn("direct group follow failed", "group", group.Direct, "node", firstLive, "error", mirrorErr)
 				detail += "；直出组跟随未确认"
 			} else if followed {
 				detail += "；直出组已跟随"
 			}
 			committed = true
-			r.notifySwitch(group, original, resultFor(firstChainLive, ranked), detail)
+			r.notifySwitch(group, original, resultFor(firstLive, ranked), detail)
 			return nil
 		}
 
@@ -245,7 +263,7 @@ func (r *Runner) Apply(ctx context.Context, group config.Group, expectedCurrent 
 }
 
 func (r *Runner) mirrorDirect(ctx context.Context, group config.Group, expected, node string) (bool, error) {
-	if !r.Cfg.Selection.SyncDirect || group.Direct == "" {
+	if group.Mode == config.GroupModeSelector || !r.Cfg.Selection.SyncDirect || group.Direct == "" {
 		return false, nil
 	}
 	if expected == "" {
@@ -290,7 +308,7 @@ func (r *Runner) rollbackSelection(group config.Group, original, owned string) e
 	if err := r.validateLiveDialer(rollbackContext, group); err != nil {
 		return err
 	}
-	connections, snapshotErr := r.Core.ChainConnections(rollbackContext, group.Chain, group.Name, owned)
+	connections, snapshotErr := r.selectionConnections(rollbackContext, group, owned)
 	if snapshotErr != nil {
 		r.logWarn("snapshot rollback connections failed", "group", group.Name, "node", owned, "error", snapshotErr)
 	}
@@ -324,7 +342,7 @@ func (r *Runner) restoreOriginal(ctx context.Context, group config.Group, origin
 	if err := r.validateLiveDialer(ctx, group); err != nil {
 		return err
 	}
-	connections, snapshotErr := r.Core.ChainConnections(ctx, group.Chain, group.Name, owned)
+	connections, snapshotErr := r.selectionConnections(ctx, group, owned)
 	if snapshotErr != nil {
 		r.logWarn("snapshot connections before retaining original failed", "group", group.Name, "node", owned, "error", snapshotErr)
 	}
@@ -345,6 +363,9 @@ func (r *Runner) restoreOriginal(ctx context.Context, group config.Group, origin
 }
 
 func (r *Runner) validateLiveDialer(ctx context.Context, group config.Group) error {
+	if group.Mode == config.GroupModeSelector {
+		return nil
+	}
 	chain, err := r.Core.Proxy(ctx, group.Chain)
 	if err != nil {
 		return fmt.Errorf("read live chain %q before changing %q: %w", group.Chain, group.Name, err)
@@ -353,6 +374,13 @@ func (r *Runner) validateLiveDialer(ctx context.Context, group config.Group) err
 		return fmt.Errorf("live chain %q uses dialer-proxy %q, refusing to change %q", group.Chain, chain.Dialer, group.Name)
 	}
 	return nil
+}
+
+func (r *Runner) selectionConnections(ctx context.Context, group config.Group, old string) ([]string, error) {
+	if group.Mode == config.GroupModeSelector {
+		return nil, nil
+	}
+	return r.Core.ChainConnections(ctx, group.Chain, group.Name, old)
 }
 
 func (r *Runner) readSelectionAfterUncertainWrite(group string) (string, error) {
@@ -408,7 +436,7 @@ func (r *Runner) notifySwitch(group config.Group, oldNode string, result model.S
 	} else if result.Kind == "bench" || result.Kind == "sweep" {
 		reason = "测速选择"
 	}
-	body := fmt.Sprintf("%s：%s → %s，%s 验证通过", reason, oldNode, result.Node, group.Chain)
+	body := fmt.Sprintf("%s：%s → %s，%s 验证通过", reason, oldNode, result.Node, group.ProbeTarget())
 	if result.Mbps > 0 && result.Kind != "recovery" {
 		body += fmt.Sprintf("，实测 %.1f Mbps", result.Mbps)
 	}
