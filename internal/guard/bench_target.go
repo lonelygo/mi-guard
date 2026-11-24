@@ -19,6 +19,11 @@ type BenchTarget struct {
 	Group   config.Group
 	Type    string
 	Current string
+	// Evidence keeps all measurements behind a decision, including failures
+	// that policy ranking correctly omits from the selectable list.
+	Evidence []model.Sample
+	// History is passed only for explaining an already computed policy ranking.
+	History []model.Sample
 }
 
 func (r *Runner) ResolveBenchTarget(ctx context.Context, query string) (BenchTarget, error) {

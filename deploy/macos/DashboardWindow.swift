@@ -9,15 +9,16 @@ final class DashboardController: ObservableObject {
     @Published private(set) var problem: String?
     @Published private(set) var loading = false
     @Published private(set) var configURL: URL?
+    @Published private(set) var requestedDecisionID: String?
 
-    private let reader: URL
+    let readerURL: URL
     private let preferences: UserDefaults
     private let configKey = "dashboard.guardConfigPath"
     private var process: Process?
 
     init(reader: URL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/mihomo-guard"),
          preferences: UserDefaults = .standard) {
-        self.reader = reader
+        self.readerURL = reader
         self.preferences = preferences
         if let path = preferences.string(forKey: configKey), path.hasPrefix("/") {
             configURL = URL(fileURLWithPath: path)
@@ -44,6 +45,7 @@ final class DashboardController: ObservableObject {
             snapshot = nil
             problem = nil
             configURL = source
+            requestedDecisionID = nil
         }
         refresh()
     }
@@ -52,8 +54,8 @@ final class DashboardController: ObservableObject {
         guard !loading else { return }
         let task = Process()
         let pipe = Pipe()
-        task.executableURL = reader
-        task.arguments = ["history"] + (configURL.map { ["-c", $0.path] } ?? [])
+        task.executableURL = readerURL
+        task.arguments = ["history"] + (configURL.map { ["-c", $0.path] } ?? []) + (requestedDecisionID.map { ["--decision", $0] } ?? [])
         // The CLI writes one JSON document on success, or a diagnostic on failure.
         // Drain a single pipe off the main thread, including for a large ledger.
         task.standardOutput = pipe
@@ -96,6 +98,21 @@ final class DashboardController: ObservableObject {
         process = nil
         loading = false
     }
+
+    func focusDecision(_ id: String) {
+        section = .selections
+        guard !id.isEmpty, requestedDecisionID != id else { return }
+        stop()
+        requestedDecisionID = id
+        refresh()
+    }
+
+    func clearDecisionFocus() {
+        guard requestedDecisionID != nil else { return }
+        stop()
+        requestedDecisionID = nil
+        refresh()
+    }
 }
 
 @MainActor
@@ -122,6 +139,8 @@ final class DashboardWindow: NSObject {
         if let destination {
             controller.section = destination.section
             if let url = destination.configURL { controller.useConfig(url, remember: false) }
+            if let id = destination.decisionID { controller.focusDecision(id) }
+            else { controller.clearDecisionFocus() }
         }
         controller.refresh()
         if window.isMiniaturized { window.deminiaturize(nil) }

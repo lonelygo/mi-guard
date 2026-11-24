@@ -243,6 +243,9 @@ func TestRankRejectsInvalidAndUsesLatestIdentity(t *testing.T) {
 	if len(got) != 1 || got[0].Mbps != 85 {
 		t.Fatalf("Rank = %+v", got)
 	}
+	if threshold, known := PreferredThreshold(append([]model.Sample{old, latest}, invalid...), 20); !known || threshold != 68 {
+		t.Fatalf("PreferredThreshold = %v, %v; want 68, true", threshold, known)
+	}
 }
 
 func TestRankUsesLatencyAsFinalTieBreaker(t *testing.T) {
@@ -251,6 +254,45 @@ func TestRankUsesLatencyAsFinalTieBreaker(t *testing.T) {
 	left.LatencyMS = 200
 	right.LatencyMS = 20
 	assertNodes(t, Rank("", []model.Sample{left, right}, nil, 20), "right", "left")
+}
+
+func TestExplainHistoryUsesTheSameMethodBoundaryAsRanking(t *testing.T) {
+	fresh := withKind(sample("node", 90, 2, 0), "bench")
+	fresh.Profile = model.DownloadProfile{Streams: 4, TotalBytes: 16 << 20, Target: strings.Repeat("a", 64)}
+	past := []model.Sample{}
+	for index, speed := range []float64{60, 80, 100} {
+		old := fresh
+		old.At = time.Unix(int64(index+2), 0)
+		old.Mbps = speed
+		old.Failures = index % 2
+		past = append(past, old)
+	}
+	wrongStreams := fresh
+	wrongStreams.At = time.Unix(10, 0)
+	wrongStreams.Profile.Streams = 1
+	wrongStreams.Mbps, wrongStreams.Attempts, wrongStreams.Failures = 999, 100, 100
+	wrongTarget := fresh
+	wrongTarget.At = time.Unix(11, 0)
+	wrongTarget.Profile.Target = strings.Repeat("b", 64)
+	wrongTarget.Mbps, wrongTarget.Attempts, wrongTarget.Failures = 999, 100, 100
+	past = append(past, wrongStreams, wrongTarget)
+
+	evidence := ExplainHistory(fresh, past)
+	if evidence.BandwidthCount != 3 || !evidence.P25Known || evidence.P25Mbps != 70 || evidence.Attempts != 8 || evidence.Failures != 1 ||
+		evidence.PastAttempts != 6 || evidence.PastFailures != 1 {
+		t.Fatalf("bench evidence mixed measurement methods: %+v", evidence)
+	}
+
+	quick := withKind(sample("node", 40, 1, 0), "quick")
+	sweep := withKind(sample("node", 50, 2, 0), "sweep")
+	sweep.At = time.Unix(20, 0)
+	confirm := withKind(sample("node", 70, 2, 1), "confirm")
+	confirm.At = time.Unix(21, 0)
+	daemonEvidence := ExplainHistory(quick, []model.Sample{sweep, confirm, fresh})
+	if daemonEvidence.BandwidthCount != 2 || daemonEvidence.P25Known || daemonEvidence.Attempts != 5 || daemonEvidence.Failures != 1 ||
+		daemonEvidence.PastAttempts != 4 || daemonEvidence.PastFailures != 1 {
+		t.Fatalf("daemon evidence mixed manual bench history: %+v", daemonEvidence)
+	}
 }
 
 func sample(node string, mbps float64, attempts, failures int) model.Sample {

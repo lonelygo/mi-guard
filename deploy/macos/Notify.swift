@@ -118,7 +118,7 @@ private final class GuardApplication: NSObject, NSApplicationDelegate, UNUserNot
             case .granted: writeOutput("Notification permission granted.")
             case .alreadyAllowed(let status): writeOutput("Notification permission: \(status.statusName).")
             }
-        case .send(let kind, let title, let body):
+        case .send(let kind, let title, let body, let eventID):
             let status = await settings()
             guard status.allowsDelivery else {
                 if status == .denied { throw HelperError(deniedMessage) }
@@ -128,9 +128,12 @@ private final class GuardApplication: NSObject, NSApplicationDelegate, UNUserNot
             content.title = title
             content.body = body
             content.threadIdentifier = "mi-guard.\(kind)"
+            var userInfo: [String: String] = [:]
             if let path = ProcessInfo.processInfo.environment["MI_GUARD_NOTIFICATION_CONFIG"], path.hasPrefix("/") {
-                content.userInfo = ["guardConfigPath": path]
+                userInfo["guardConfigPath"] = path
             }
+            if let eventID { userInfo["decisionID"] = eventID }
+            content.userInfo = userInfo
             content.sound = .default
             try await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         case .dashboard:

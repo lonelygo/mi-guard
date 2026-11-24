@@ -272,8 +272,13 @@ func contains(values []string, wanted string) bool {
 	return false
 }
 
-func (r *Runner) notifySwitch(group config.Group, oldNode string, result model.Sample, detail string) {
+func (r *Runner) notifySwitch(group config.Group, oldNode string, result model.Sample, detail, eventID string) {
 	if r.Notify == nil || !r.Cfg.Notifications.Enabled || !r.Cfg.Notifications.Switch {
+		if r.NotifyEvent == nil || !r.Cfg.Notifications.Enabled || !r.Cfg.Notifications.Switch {
+			return
+		}
+	}
+	if r.NotifyEvent == nil && r.Notify == nil {
 		return
 	}
 	reason := "链路故障恢复"
@@ -289,7 +294,11 @@ func (r *Runner) notifySwitch(group config.Group, oldNode string, result model.S
 	if detail != "" {
 		body += "；" + detail
 	}
-	r.Notify("switch", group.Name+" 已切换", body)
+	if r.NotifyEvent != nil {
+		r.NotifyEvent("switch", group.Name+" 已切换", body, eventID)
+	} else {
+		r.Notify("switch", group.Name+" 已切换", body)
+	}
 }
 
 func (r *Runner) logWarn(message string, args ...any) {

@@ -21,7 +21,18 @@ private enum DashboardDataTests {
              "guardSelected":false,"longestNode":"","longestSeconds":0},
             {"name":"archived","chain":"","configured":false,"node":"leaf","since":"2026-03-15T00:01:00Z",
              "lastSeen":"2026-03-15T00:01:03.75Z","guardSelected":true,"longestNode":"old","longestSeconds":8.5}
-          ]
+          ],
+          "decisions":[
+            {"id":"decision-1","at":"2026-03-15T08:02:00Z","source":"manual","group":"primary","chain":"exit",
+             "before":"a","after":"b","action":"switched","trigger":"manualBench","nearBestPct":20,"thresholdMbps":80,
+             "candidates":[{"node":"b","kind":"bench","mbps":100,"latencyMS":30,"attempts":2,"failures":0,
+                            "streams":4,"requestedBytes":16777216,"rank":1,"preferredBand":true,
+                            "strategyAttempts":8,"strategyFailures":1,"historyAttempts":6,"historyFailures":1,
+                            "historySamples":3,"historyP25Mbps":88,"selected":true}],
+             "followers":[{"group":"direct","before":"a","after":"b","action":"switched"}]}
+          ],
+          "selectedDecision":{"id":"decision-1","at":"2026-03-15T08:02:00Z","source":"manual","group":"primary",
+             "before":"a","after":"b","action":"switched"}
         }
         """
         let snapshot = try DashboardSnapshot.decode(Data(wire.utf8))
@@ -38,6 +49,11 @@ private enum DashboardDataTests {
         precondition(unobserved.since == nil && unobserved.lastSeen == nil && !unobserved.guardSelected)
         precondition(!archived.configured && archived.guardSelected && archived.lastSeen?.timeIntervalSince(archived.since!) == 3.75)
         precondition(archived.longestNode == "old" && archived.longestSeconds == 8.5)
+        let decision = snapshot.decisionHistory[0]
+        precondition(decision.id == "decision-1" && decision.evidence[0].selected == true && decision.evidence[0].streams == 4)
+        precondition(decision.evidence[0].rank == 1 && decision.evidence[0].preferredBand == true && decision.evidence[0].historyP25Mbps == 88)
+        precondition(decision.evidence[0].strategyAttempts == 8 && decision.evidence[0].historyAttempts == 6)
+        precondition(decision.followResults[0].group == "direct" && snapshot.selectedDecision?.id == decision.id)
 
         func sample(_ mbps: Double, failures: Int = 0, error: String = "") -> LedgerSample {
             LedgerSample(time: legacy.time, node: "n", provider: "", scope: "front", kind: "bench", mbps: mbps,
@@ -50,7 +66,8 @@ private enum DashboardDataTests {
         let group = LedgerGroup(name: "other", chain: "", configured: true, node: "", since: nil, lastSeen: nil,
                                 guardSelected: false, longestNode: "", longestSeconds: 0)
         let constructed = DashboardSnapshot(budgetBytes: 1, usedBytes: 0, pendingBytes: 0, cycleStart: snapshot.cycleStart,
-                                           cycleEnd: snapshot.cycleEnd, lastSweep: nil, samples: [legacy], groups: [group])
+                                           cycleEnd: snapshot.cycleEnd, lastSweep: nil, samples: [legacy], groups: [group],
+                                           decisions: nil, selectedDecision: nil, decisionWarning: nil)
         func checkSendable<T: Sendable>(_: T) {}
         checkSendable(constructed)
         checkSendable(Set(constructed.samples))

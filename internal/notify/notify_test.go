@@ -43,6 +43,24 @@ func TestSenderFiltersAndDrainsEnabledKinds(t *testing.T) {
 	}
 }
 
+func TestSenderIncludesOptionalDecisionEvent(t *testing.T) {
+	app, output := fakeApp(t)
+	sender := New(config.Notifications{Enabled: true, Switch: true, Helper: app}, "", nil)
+	sender.SendEvent("switch", "group", "a to b", "event-opaque-123")
+	sender.Close()
+
+	contents, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(contents)
+	for _, expected := range []string{"--event-id", "event-opaque-123"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("helper output %q does not contain %q", got, expected)
+		}
+	}
+}
+
 func TestDisabledSenderDoesNotRunHelper(t *testing.T) {
 	app, output := fakeApp(t)
 	sender := New(config.Notifications{Enabled: false, Summary: true, Switch: true, Helper: app}, "", nil)

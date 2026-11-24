@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -19,14 +20,17 @@ import (
 )
 
 type DashboardSnapshot struct {
-	BudgetBytes  int64          `json:"budgetBytes"`
-	UsedBytes    int64          `json:"usedBytes"` // Includes pending reservations.
-	PendingBytes int64          `json:"pendingBytes"`
-	CycleStart   time.Time      `json:"cycleStart"`
-	CycleEnd     time.Time      `json:"cycleEnd"`
-	LastSweep    *time.Time     `json:"lastSweep"`
-	Samples      []LedgerSample `json:"samples"`
-	Groups       []LedgerGroup  `json:"groups"`
+	BudgetBytes      int64              `json:"budgetBytes"`
+	UsedBytes        int64              `json:"usedBytes"` // Includes pending reservations.
+	PendingBytes     int64              `json:"pendingBytes"`
+	CycleStart       time.Time          `json:"cycleStart"`
+	CycleEnd         time.Time          `json:"cycleEnd"`
+	LastSweep        *time.Time         `json:"lastSweep"`
+	Samples          []LedgerSample     `json:"samples"`
+	Groups           []LedgerGroup      `json:"groups"`
+	Decisions        []history.Decision `json:"decisions"`
+	SelectedDecision *history.Decision  `json:"selectedDecision,omitempty"`
+	DecisionWarning  string             `json:"decisionWarning,omitempty"`
 }
 
 type LedgerSample struct {
@@ -59,6 +63,10 @@ type LedgerGroup struct {
 }
 
 func writeDashboardHistory(out io.Writer, path string) error {
+	return writeDashboardHistoryForDecision(out, path, "")
+}
+
+func writeDashboardHistoryForDecision(out io.Writer, path, decisionID string) error {
 	cfg, err := config.LoadGuard(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("找不到 guard 配置，可选择已有 YAML，或先运行 mihomo-guard init（%w）", os.ErrNotExist)
@@ -74,14 +82,34 @@ func writeDashboardHistory(out io.Writer, path string) error {
 	result := DashboardSnapshot{
 		BudgetBytes: cfg.Speed.MonthlyBytes, UsedBytes: past.UsedBytes, PendingBytes: past.PendingBytes,
 		CycleStart: past.CycleStart, CycleEnd: past.CycleStart.AddDate(0, 1, 0),
-		Samples: make([]LedgerSample, 0, len(past.Samples)),
-		Groups:  dashboardGroups(cfg.Groups, past.Selections),
+		Samples:   make([]LedgerSample, 0, len(past.Samples)),
+		Groups:    dashboardGroups(cfg.Groups, past.Selections),
+		Decisions: make([]history.Decision, 0),
 	}
 	if !past.LastSweep.IsZero() {
 		result.LastSweep = &past.LastSweep
 	}
 	for _, sample := range past.Samples {
 		result.Samples = append(result.Samples, dashboardSample(sample))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	decisions, decisionErr := store.RecentDecisions(ctx, 60)
+	if decisionErr != nil {
+		result.DecisionWarning = "无法读取线路决策记录，测速与选用历史仍可正常查看。"
+	} else if decisions != nil {
+		result.Decisions = decisions
+	}
+	if decisionID != "" {
+		selected, err := store.DecisionByID(ctx, decisionID)
+		switch {
+		case err == nil:
+			result.SelectedDecision = &selected
+		case errors.Is(err, history.ErrDecisionNotFound):
+			result.DecisionWarning = "这条通知对应的线路决策已过期或不存在。"
+		default:
+			result.DecisionWarning = "无法读取这条通知对应的线路决策，测速与选用历史仍可正常查看。"
+		}
 	}
 	return json.NewEncoder(out).Encode(result)
 }

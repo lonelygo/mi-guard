@@ -40,9 +40,10 @@ type Sender struct {
 }
 
 type message struct {
-	kind  string
-	title string
-	body  string
+	kind    string
+	title   string
+	body    string
+	eventID string
 }
 
 func New(configuration config.Notifications, configPath string, logger *slog.Logger) *Sender {
@@ -70,6 +71,13 @@ func New(configuration config.Notifications, configPath string, logger *slog.Log
 // Send queues a notification when its configured class is enabled. A full
 // queue drops the message and logs it rather than delaying health checks.
 func (s *Sender) Send(kind, title, body string) {
+	s.SendEvent(kind, title, body, "")
+}
+
+// SendEvent queues a notification linked to a durable dashboard event. The
+// optional opaque ID is passed as an extra helper argument. The 0.1.4 helper
+// parses named send arguments and ignores this appended flag during upgrades.
+func (s *Sender) SendEvent(kind, title, body, eventID string) {
 	if !s.allowed(kind) {
 		return
 	}
@@ -79,7 +87,7 @@ func (s *Sender) Send(kind, title, body string) {
 		return
 	}
 	select {
-	case s.queue <- message{kind: kind, title: title, body: body}:
+	case s.queue <- message{kind: kind, title: title, body: body, eventID: eventID}:
 	default:
 		s.logger.Warn("notification queue full", "kind", kind, "title", title)
 	}
@@ -168,12 +176,16 @@ func (s *Sender) deliver(item message) error {
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, deliveryTimeout)
 	defer cancel()
-	command := exec.CommandContext(ctx, executable,
+	arguments := []string{
 		"--send",
 		"--kind", item.kind,
 		"--title", item.title,
 		"--body", item.body,
-	)
+	}
+	if item.eventID != "" {
+		arguments = append(arguments, "--event-id", item.eventID)
+	}
+	command := exec.CommandContext(ctx, executable, arguments...)
 	command.Env = append(os.Environ(), "MI_GUARD_NOTIFICATION_CONFIG="+s.configPath)
 	output, err := command.CombinedOutput()
 	if err != nil {

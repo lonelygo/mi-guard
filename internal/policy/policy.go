@@ -34,33 +34,11 @@ func Dropped(now, baseline, pct float64) bool {
 // reliability, historical lower-quartile bandwidth, current-node stickiness,
 // then latency. Slower results remain usable fallbacks ordered by current speed.
 func Rank(current string, fresh, past []model.Sample, tolerance float64) []model.Sample {
-	latest := make(map[string]model.Sample)
-	order := make(map[string]int)
-	for index, sample := range fresh {
-		if !HasBandwidth(sample) {
-			continue
-		}
-		key := identity(sample)
-		prior, exists := latest[key]
-		if !exists || prior.At.Before(sample.At) || prior.At.Equal(sample.At) && index > order[key] {
-			latest[key] = sample
-			order[key] = index
-		}
-	}
+	latest := latestBandwidthSamples(fresh)
 	if len(latest) == 0 {
 		return nil
 	}
-	if math.IsNaN(tolerance) || tolerance < 0 {
-		tolerance = 0
-	}
-	if tolerance > 100 {
-		tolerance = 100
-	}
-	best := 0.0
-	for _, sample := range latest {
-		best = max(best, sample.Mbps)
-	}
-	threshold := best * (1 - tolerance/100)
+	threshold, _ := PreferredThreshold(fresh, tolerance)
 	preferred := make([]ranked, 0, len(latest))
 	fallback := make([]ranked, 0, len(latest))
 	for _, sample := range latest {
@@ -88,6 +66,43 @@ func Rank(current string, fresh, past []model.Sample, tolerance float64) []model
 		result = append(result, item.sample)
 	}
 	return result
+}
+
+// PreferredThreshold returns the exact near-best boundary used by Rank for
+// the latest valid observation of each candidate identity.
+func PreferredThreshold(fresh []model.Sample, tolerance float64) (float64, bool) {
+	latest := latestBandwidthSamples(fresh)
+	if len(latest) == 0 {
+		return 0, false
+	}
+	if math.IsNaN(tolerance) || tolerance < 0 {
+		tolerance = 0
+	}
+	if tolerance > 100 {
+		tolerance = 100
+	}
+	best := 0.0
+	for _, sample := range latest {
+		best = max(best, sample.Mbps)
+	}
+	return best * (1 - tolerance/100), true
+}
+
+func latestBandwidthSamples(fresh []model.Sample) map[string]model.Sample {
+	latest := make(map[string]model.Sample)
+	order := make(map[string]int)
+	for index, sample := range fresh {
+		if !HasBandwidth(sample) {
+			continue
+		}
+		key := identity(sample)
+		prior, exists := latest[key]
+		if !exists || prior.At.Before(sample.At) || prior.At.Equal(sample.At) && index > order[key] {
+			latest[key] = sample
+			order[key] = index
+		}
+	}
+	return latest
 }
 
 type ranked struct {
@@ -162,9 +177,35 @@ func Comparable(fresh, old model.Sample) bool {
 }
 
 type sampleStats struct {
-	bandwidth []float64
-	attempts  int
-	failures  int
+	bandwidth    []float64
+	attempts     int
+	failures     int
+	pastAttempts int
+	pastFailures int
+}
+
+// HistoryEvidence exposes the exact comparable-history inputs used by Rank.
+// Attempts and failures include the fresh candidate just as the ranking risk
+// does. P25 is available only after the same three-bandwidth-sample gate.
+type HistoryEvidence struct {
+	Attempts       int
+	Failures       int
+	PastAttempts   int
+	PastFailures   int
+	BandwidthCount int
+	P25Mbps        float64
+	P25Known       bool
+}
+
+func ExplainHistory(sample model.Sample, past []model.Sample) HistoryEvidence {
+	stats := statsFor(sample, past)
+	evidence := HistoryEvidence{Attempts: stats.attempts, Failures: stats.failures,
+		PastAttempts: stats.pastAttempts, PastFailures: stats.pastFailures, BandwidthCount: len(stats.bandwidth)}
+	if len(stats.bandwidth) >= 3 {
+		evidence.P25Mbps = percentile(stats.bandwidth, 0.25)
+		evidence.P25Known = true
+	}
+	return evidence
 }
 
 const maxReliabilityObservations = 1_000_000_000
@@ -186,6 +227,10 @@ func statsFor(sample model.Sample, past []model.Sample) sampleStats {
 			stats.bandwidth = append(stats.bandwidth, old.Mbps)
 		}
 		if id != fresh {
+			attempts := min(max(old.Attempts, 0), maxReliabilityObservations)
+			failures := min(max(old.Failures, 0), attempts)
+			stats.pastAttempts = min(stats.pastAttempts+attempts, maxReliabilityObservations)
+			stats.pastFailures = min(stats.pastFailures+failures, stats.pastAttempts)
 			stats.addProbes(old)
 		}
 	}

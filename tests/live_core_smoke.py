@@ -1002,6 +1002,13 @@ def exercise(core: Path, guard: Path) -> None:
                     assert_names(run_guard(guard, *args), "保持 🌐 普通选线", "Node Manual")
                     automatic = run_guard(guard, "bench", "-c", str(guard_config), "-g", "自动", "--bytes", "65536", "--apply")
                     assert_names(automatic, "跳过 🧭 自动选线", "Node Manual")
+                    recent = json.loads(run_guard(guard, "history", "-c", str(guard_config)))["decisions"]
+                    switched = next(event for event in recent if event["action"] == "switched" and event["group"] == "🌐 普通选线")
+                    selected = json.loads(run_guard(guard, "history", "-c", str(guard_config), "--decision", switched["id"]))
+                    if selected["selectedDecision"] != switched or switched["after"] != "Node Manual":
+                        raise AssertionError("history did not reopen the exact manual selection")
+                    if not json.loads(run_guard(guard, "flights", "-c", str(guard_config)))["online"]:
+                        raise AssertionError("regional flight reader did not reach the isolated core")
 
                     source = run_guard(
                         guard,

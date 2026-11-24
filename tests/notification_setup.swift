@@ -14,14 +14,16 @@ private struct NotificationSetupTests {
         let check = try HelperMode(arguments: ["--check"])
         let launchedCheck = try HelperMode(arguments: ["-psn_0_12345", "--check"])
         let send = try HelperMode(arguments: ["--send", "--kind", "switch", "--title", "title", "--body", "body"])
+        let linkedSend = try HelperMode(arguments: ["--send", "--event-id", "decision-1", "--body", "body", "--kind", "switch", "--title", "title"])
         precondition(explicit == .authorize && check == .check && launchedCheck == .check)
-        precondition(send == .send(kind: "switch", title: "title", body: "body"))
+        precondition(send == .send(kind: "switch", title: "title", body: "body", eventID: nil))
+        precondition(linkedSend == .send(kind: "switch", title: "title", body: "body", eventID: "decision-1"))
         let source = "/tmp/guard config/guard.yaml"
         let click = UNNotificationDefaultActionIdentifier
-        let switchClick = DashboardDestination(action: click, thread: "mi-guard.switch", userInfo: ["guardConfigPath": source])
-        precondition(switchClick?.section == .selections && switchClick?.configURL?.path == source)
+        let switchClick = DashboardDestination(action: click, thread: "mi-guard.switch", userInfo: ["guardConfigPath": source, "decisionID": "decision-1"])
+        precondition(switchClick?.section == .selections && switchClick?.configURL?.path == source && switchClick?.decisionID == "decision-1")
         let summaryClick = DashboardDestination(action: click, thread: "mi-guard.summary", userInfo: [:])
-        precondition(summaryClick?.section == .overview && summaryClick?.configURL == nil)
+        precondition(summaryClick?.section == .overview && summaryClick?.configURL == nil && summaryClick?.decisionID == nil)
         precondition(DashboardDestination(action: UNNotificationDismissActionIdentifier, thread: "mi-guard.switch", userInfo: [:]) == nil)
 
         var requests = 0

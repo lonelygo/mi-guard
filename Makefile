@@ -7,6 +7,9 @@ GUARD_LOG ?= $(HOME)/Library/Logs/mihomo-guard.log
 STABLE_CORE ?= $(shell command -v mihomo)
 BUILD_DIR ?= build
 MACOSX_DEPLOYMENT_TARGET ?= 12.0
+ifeq ($(shell uname -s),Darwin)
+RELEASE_VERSION ?= $(shell /usr/bin/plutil -extract CFBundleShortVersionString raw -o - deploy/macos/Info.plist)
+endif
 RELEASE_GO_TOOLCHAIN ?= go1.26.11
 SWIFT_FLAGS ?= -target $(shell uname -m)-apple-macos$(MACOSX_DEPLOYMENT_TARGET)
 APP_SWIFT := $(wildcard deploy/macos/*.swift)
@@ -17,7 +20,7 @@ build: cli
 
 cli:
 	mkdir -p "$(BUILD_DIR)"
-	MACOSX_DEPLOYMENT_TARGET="$(MACOSX_DEPLOYMENT_TARGET)" go build -trimpath -ldflags "-X main.releaseVersion=$(RELEASE_VERSION)" -o "$(BUILD_DIR)/mihomo-guard" ./cmd/mihomo-guard
+	MACOSX_DEPLOYMENT_TARGET="$(MACOSX_DEPLOYMENT_TARGET)" go build -trimpath -ldflags "-w -X main.releaseVersion=$(RELEASE_VERSION)" -o "$(BUILD_DIR)/mihomo-guard" ./cmd/mihomo-guard
 
 test:
 	go test -race ./...
@@ -36,6 +39,10 @@ test-macos-dashboard: cli
 	"$(BUILD_DIR)/dashboard-metrics-tests"
 	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) $(DASHBOARD_SWIFT) tests/dashboard_window.swift -o "$(BUILD_DIR)/dashboard-window-tests"
 	"$(BUILD_DIR)/dashboard-window-tests" "$(abspath $(BUILD_DIR)/mihomo-guard)"
+	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) deploy/macos/FlightMapData.swift deploy/macos/FlightMapGeometry.swift deploy/macos/FlightNaturalEarth.swift tests/flight_map.swift -o "$(BUILD_DIR)/flight-map-tests"
+	"$(BUILD_DIR)/flight-map-tests"
+	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) deploy/macos/Flight*.swift tests/flight_panel.swift -o "$(BUILD_DIR)/flight-panel-tests"
+	"$(BUILD_DIR)/flight-panel-tests"
 
 $(BUILD_DIR)/AppIcon.icns: deploy/macos/AppIcon.png
 	mkdir -p "$(BUILD_DIR)/AppIcon.iconset"

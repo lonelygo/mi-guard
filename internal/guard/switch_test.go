@@ -291,7 +291,10 @@ func TestApplySwitchesChainBeforeBestEffortDirect(t *testing.T) {
 	fixture, server := newControllerFixture(t)
 	runner := testRunner(t, fixture, server)
 	var notification string
-	runner.Notify = func(_, _, body string) { notification = body }
+	var notificationEventID string
+	runner.NotifyEvent = func(_, _, body, eventID string) {
+		notification, notificationEventID = body, eventID
+	}
 
 	selected, err := runner.Apply(context.Background(), config.Group{Name: "warp", Chain: "chain", Direct: "direct"}, "a", []model.Sample{{Node: "b", Mbps: 80}})
 	if err != nil {
@@ -307,6 +310,16 @@ func TestApplySwitchesChainBeforeBestEffortDirect(t *testing.T) {
 	}
 	if !strings.Contains(notification, "直出组已跟随") {
 		t.Fatalf("notification did not describe direct result: %q", notification)
+	}
+	if notificationEventID == "" {
+		if _, unavailable := runner.Store.DecisionByID(context.Background(), "probe"); !errors.Is(unavailable, history.ErrAnalyticsUnavailable) && !errors.Is(unavailable, history.ErrDecisionNotFound) {
+			t.Fatalf("missing notification decision id with analytics error %v", unavailable)
+		}
+		return
+	}
+	decision, err := runner.Store.DecisionByID(context.Background(), notificationEventID)
+	if err != nil || decision.Action != "switched" || decision.Before != "a" || decision.After != "b" || len(decision.Followers) != 1 || decision.Followers[0].After != "b" {
+		t.Fatalf("linked decision = %+v, %v", decision, err)
 	}
 }
 

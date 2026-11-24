@@ -39,13 +39,15 @@ func (r *Runner) ApplyBenchTarget(ctx context.Context, target BenchTarget, ranke
 	return r.applySelections(ctx, target, ranked, true)
 }
 
-func (r *Runner) applySelections(ctx context.Context, target BenchTarget, ranked []model.Sample, bench bool) ([]SelectionResult, error) {
+func (r *Runner) applySelections(ctx context.Context, target BenchTarget, ranked []model.Sample, bench bool) (results []SelectionResult, resultErr error) {
 	group := target.Group
 	if group.Name == "" {
 		return nil, errors.New("empty group name")
 	}
-	var results []SelectionResult
-	err := withSelectorLock(ctx, "apply", func() error {
+	event := newDecision(target, ranked, bench, r.Cfg.Selection.NearBestPct)
+	var notificationOld, notificationDetail string
+	var notificationResult model.Sample
+	resultErr = withSelectorLock(ctx, "apply", func() error {
 		primary := SelectionResult{Group: group.Name, Before: target.Current, After: target.Current, Action: "skipped"}
 		if group.Name == r.Cfg.Mihomo.TestGroup {
 			primary.Reason = "测速专用组仅用于扫描，不能作为切换目标"
@@ -144,10 +146,21 @@ func (r *Runner) applySelections(ctx context.Context, target BenchTarget, ranked
 			}
 			recordErr = errors.Join(recordErr, r.recordSelection(ctx, outcome, followerObserved))
 		}
-		r.notifySwitch(group, current.Now, chosen, detail)
+		notificationOld, notificationResult, notificationDetail = current.Now, chosen, detail
 		return recordErr
 	})
-	return results, err
+	completeDecision(&event, results, resultErr)
+	decisionErr := recordDecision(ctx, r.Store, event)
+	eventID := ""
+	if decisionErr == nil && r.Store != nil {
+		eventID = event.ID
+	} else if decisionErr != nil {
+		r.logWarn("record selection decision failed", "group", group.Name, "action", event.Action, "error", decisionErr)
+	}
+	if notificationResult.Node != "" {
+		r.notifySwitch(group, notificationOld, notificationResult, notificationDetail, eventID)
+	}
+	return results, resultErr
 }
 
 func nonSelectorReason(typ string) string {

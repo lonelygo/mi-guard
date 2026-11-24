@@ -34,9 +34,7 @@ struct DashboardOverview: View {
     let history: DashboardHistory
     let focus: DashboardSeries
     let period: DashboardPeriod
-    let groups: [LedgerGroup]
     let onNode: (DashboardSeries) -> Void
-    let onGroups: () -> Void
 
     var body: some View {
         let values = history.records[focus] ?? []
@@ -44,8 +42,7 @@ struct DashboardOverview: View {
                                     : period.domain(first: values.first?.time, last: values.last?.time, now: Date())
         let comparison = DashboardComparison(history: history, focus: focus, domain: domain)
         let maximum = comparison.rows.first?.sample.mbps ?? 0
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: 9) {
                 Label(comparison.comparable ? "相同测法的节点" : "最近测速节点", systemImage: "chart.bar.xaxis")
                     .font(.headline)
                 if comparison.rows.isEmpty {
@@ -77,28 +74,6 @@ struct DashboardOverview: View {
                 }
                 Text(comparison.comparable ? "按各节点在所选时段的最后一次结果比较" : "按最后测速时间排列")
                     .font(.caption).foregroundColor(.secondary)
-            }.dashboardCard(13)
-
-            VStack(alignment: .leading, spacing: 9) {
-                HStack {
-                    Label("线路选用", systemImage: "arrow.triangle.branch").font(.headline)
-                    Spacer()
-                    Button("查看全部", action: onGroups).buttonStyle(.link).font(.caption)
-                }
-                if groups.isEmpty {
-                    Text("暂无策略组记录").font(.callout).foregroundColor(.secondary)
-                }
-                ForEach(groups.prefix(3), id: \.name) { group in
-                    HStack(spacing: 6) {
-                        Text(verbatim: group.name).lineLimit(1).truncationMode(.middle)
-                        Spacer(minLength: 2)
-                        Text(verbatim: group.node.isEmpty ? "尚无观测" : group.node)
-                            .foregroundColor(.secondary).lineLimit(1).truncationMode(.middle)
-                    }.font(.callout)
-                }
-                Text(groups.contains { $0.lastSeen != nil } ? "节点取自各组的末次观测" : "运行 mihomo-guard check 或启动 daemon 后开始记录")
-                    .font(.caption).foregroundColor(.secondary)
-            }.dashboardCard(13)
-        }
+        }.dashboardCard(13)
     }
 }

@@ -61,6 +61,12 @@ history:
   file: speed-history.json    # 测速与流量账本。选用时长保存在同目录的 <文件名>.selections.json。
   samples_per_node: 50       # 每个 provider 和节点名组合保留的最近带宽样本数，至少 1 条。
 
+# 地图只在本地定位，不查询外部地理服务。地区不明时保留为未知。
+flight_map:
+  record_history: true       # daemon 每 10 秒观察活跃连接，按地区汇总增量。
+  country_database: ""       # 默认在 Mihomo 配置目录查找 Country.mmdb 或 geoip.metadb。
+  route_regions: {}          # 可选，如 {"dialer-proxy-1": "US"}，名称与内核完全一致。
+
 notifications:
   enabled: true              # macOS 通知总开关。
   summary: true              # 全组扫描结束后发送一条摘要。

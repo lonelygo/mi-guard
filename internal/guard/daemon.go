@@ -155,7 +155,7 @@ func (d *daemonRuntime) recoverHard(ctx context.Context, group config.Group, cur
 	for index := range ranked {
 		ranked[index].Kind = "recovery"
 	}
-	selected, err := d.apply(ctx, group, current, ranked)
+	selected, err := d.apply(ctx, group, current, ranked, ranked, snapshot.Samples)
 	if err != nil {
 		return err
 	}
@@ -330,11 +330,13 @@ func (d *daemonRuntime) considerSlow(ctx context.Context, group config.Group, cu
 	}
 	currentSample, ok := sampleFor(current, fresh)
 	if !ok {
+		d.runner.recordDecisionOutcome(ctx, group, current, "skipped", "当前节点没有可比较测速结果", fresh)
 		return
 	}
 	baseline := policy.Baseline(currentSample, past)
 	if !bandwidthDegraded(currentSample, baseline, group.MinMbps, d.runner.Cfg.Selection.SevereDropPct) {
 		d.cancelPendingSlow(group.Name)
+		d.runner.recordDecisionOutcome(ctx, group, current, "kept", "", fresh)
 		return
 	}
 	generation, started := d.startPendingSlow(group.Name)
@@ -370,15 +372,18 @@ func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, ini
 		}
 		currentResult, err = d.measure(ctx, current, "confirm", d.runner.Cfg.Speed.ConfirmBytes)
 		if err != nil {
+			d.runner.recordDecisionOutcome(ctx, group, current, "failed", "复测未完成", append([]model.Sample{initial}, currentResult))
 			return
 		}
 		if !policy.Comparable(initial, currentResult) || !bandwidthDegraded(currentResult, baseline, group.MinMbps, d.runner.Cfg.Selection.SevereDropPct) {
+			d.runner.recordDecisionOutcome(ctx, group, current, "kept", "复测未确认持续降速", append([]model.Sample{initial}, currentResult))
 			return
 		}
 		confirmations++
 	}
 
 	if d.inCooldown(group.Name) {
+		d.runner.recordDecisionOutcome(ctx, group, current, "skipped", "处于切换冷静期", []model.Sample{currentResult})
 		return
 	}
 	if !d.pendingMatches(group.Name, current, generation) {
@@ -386,6 +391,7 @@ func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, ini
 	}
 	candidates, err := d.candidates(ctx, group.Name)
 	if err != nil {
+		d.runner.recordDecisionOutcome(ctx, group, current, "failed", "无法读取候选节点", []model.Sample{currentResult})
 		return
 	}
 	seed := initialFresh
@@ -399,6 +405,7 @@ func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, ini
 	shortlist := alternativeNodes(current, policy.Rank(current, seed, past, d.runner.Cfg.Selection.NearBestPct), 2)
 	shortlist = appendUnknownAlternatives(shortlist, current, candidates, 2)
 	if len(shortlist) == 0 {
+		d.runner.recordDecisionOutcome(ctx, group, current, "kept", "没有可复测的备选节点", []model.Sample{currentResult})
 		return
 	}
 	confirmed := []model.Sample{currentResult}
@@ -418,12 +425,13 @@ func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, ini
 		ranked = withoutNode(ranked, current)
 	}
 	if !hasBetterAlternative(current, currentResult.Mbps, ranked, group.MinMbps) {
+		d.runner.recordDecisionOutcome(ctx, group, current, "kept", "没有满足切换条件的更优候选", confirmed)
 		return
 	}
 	if !d.pendingMatches(group.Name, current, generation) {
 		return
 	}
-	selected, err := d.apply(ctx, group, current, ranked)
+	selected, err := d.apply(ctx, group, current, ranked, confirmed, past)
 	if err != nil {
 		d.runner.logWarn("slow-path switch failed", "group", group.Name, "error", err)
 		return
@@ -593,11 +601,18 @@ func (d *daemonRuntime) candidates(ctx context.Context, group string) ([]string,
 	return d.runner.Candidates(ctx, group)
 }
 
-func (d *daemonRuntime) apply(ctx context.Context, group config.Group, expected string, ranked []model.Sample) (string, error) {
+func (d *daemonRuntime) apply(ctx context.Context, group config.Group, expected string, ranked, evidence, past []model.Sample) (string, error) {
 	if d.applyFn != nil {
 		return d.applyFn(ctx, group, expected, ranked)
 	}
-	return d.runner.Apply(ctx, group, expected, ranked)
+	results, err := d.runner.applySelections(ctx, BenchTarget{Group: group, Current: expected, Evidence: evidence, History: past}, ranked, false)
+	if len(results) == 0 {
+		return "", err
+	}
+	if results[0].Action == "skipped" {
+		return "", errors.Join(errors.New(results[0].Reason), err)
+	}
+	return results[0].After, err
 }
 
 func (d *daemonRuntime) stableProxy(ctx context.Context, group string) (model.Proxy, error) {

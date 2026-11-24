@@ -120,7 +120,46 @@ private struct DashboardWindowTests {
         for (name, object) in [("history.json", ledger), ("history.json.selections.json", selections as [String: Any])] {
             try JSONSerialization.data(withJSONObject: object).write(to: directory.appendingPathComponent(name), options: .atomic)
         }
+        try writeDecisionHistory(in: directory, at: now)
         return config
+    }
+
+    private static func writeDecisionHistory(in directory: URL, at: Date) throws {
+        let decision: [String: Any] = [
+            "id": "fixture-switch", "at": ISO8601DateFormatter().string(from: at), "source": "manual",
+            "group": "美西优选", "chain": "美西出口", "before": "洛杉矶 · LA 02", "after": "洛杉矶 · LA 01",
+            "action": "switched", "trigger": "manualBench", "nearBestPct": 20, "thresholdMbps": 92.8, "minMbps": 40,
+            "candidates": [
+                ["node": "洛杉矶 · LA 01", "kind": "bench", "mbps": 97.0, "latencyMS": 168, "attempts": 2,
+                 "streams": 4, "requestedBytes": 16_777_216, "bytes": 16_777_216, "rank": 1, "preferredBand": true,
+                 "strategyAttempts": 42, "strategyFailures": 0, "historyAttempts": 40, "historyFailures": 0,
+                 "historySamples": 3, "historyP25Mbps": 90.0, "selected": true],
+                ["node": "洛杉矶 · LA 02", "kind": "bench", "mbps": 116.0, "latencyMS": 182, "attempts": 2,
+                 "streams": 4, "requestedBytes": 16_777_216, "bytes": 16_777_216, "rank": 2, "preferredBand": true,
+                 "strategyAttempts": 42, "strategyFailures": 8, "historyAttempts": 40, "historyFailures": 8,
+                 "historySamples": 3, "historyP25Mbps": 70.0],
+                ["node": "洛杉矶 · LA 03", "kind": "bench", "attempts": 1, "failures": 1,
+                 "streams": 4, "requestedBytes": 16_777_216, "stage": "probe", "status": "HTTP 504"]
+            ],
+            "followers": [["group": "美国节点", "before": "洛杉矶 · LA 02", "after": "洛杉矶 · LA 01", "action": "switched"]]
+        ]
+        let document = try JSONSerialization.data(withJSONObject: decision)
+        let hex = document.map { String(format: "%02x", $0) }.joined()
+        let nanos = Int64(at.timeIntervalSince1970 * 1_000_000_000)
+        let sql = "CREATE TABLE decisions (id TEXT PRIMARY KEY NOT NULL, at_ns INTEGER NOT NULL, document BLOB NOT NULL);" +
+                  "CREATE INDEX decisions_at ON decisions(at_ns DESC);PRAGMA user_version = 1;" +
+                  "INSERT INTO decisions VALUES('fixture-switch',\(nanos),X'\(hex)');"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [directory.appendingPathComponent("history.json.analytics.sqlite3").path, sql]
+        let diagnostics = Pipe()
+        process.standardError = diagnostics
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let detail = String(decoding: diagnostics.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            throw HelperError("cannot create decision fixture: \(detail)")
+        }
     }
 
     private static func render(_ controller: DashboardController, config: URL, into directory: URL) async throws {
@@ -130,14 +169,18 @@ private struct DashboardWindowTests {
         let view = DashboardWindow(controller: controller, restoreFrame: false)
         defer { view.window.orderOut(nil) }
         let switchClick = DashboardDestination(action: UNNotificationDefaultActionIdentifier, thread: "mi-guard.switch",
-                                               userInfo: ["guardConfigPath": config.path])!
+                                               userInfo: ["guardConfigPath": config.path, "decisionID": "fixture-switch"])!
         let summaryClick = DashboardDestination(action: UNNotificationDefaultActionIdentifier, thread: "mi-guard.summary", userInfo: [:])!
         view.present(switchClick)
         try await waitForRead(controller)
         precondition(view.window.isVisible && controller.section == .selections && controller.configURL == config.standardizedFileURL)
+        precondition(controller.requestedDecisionID == "fixture-switch" && controller.snapshot?.selectedDecision?.id == "fixture-switch")
+        controller.focusDecision("expired-decision-id")
+        try await waitForRead(controller)
+        precondition(controller.snapshot?.decisionWarning?.contains("已过期") == true)
         let windowNumber = view.window.windowNumber
         view.present(summaryClick)
-        precondition(view.window.windowNumber == windowNumber && controller.section == .overview)
+        precondition(view.window.windowNumber == windowNumber && controller.section == .overview && controller.requestedDecisionID == nil)
         try await waitForRead(controller)
         for (section, appearance, name) in [
             (DashboardSection.overview, NSAppearance.Name.darkAqua, "overview-dark"),

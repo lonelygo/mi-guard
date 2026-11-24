@@ -22,6 +22,7 @@ private extension DashboardSection {
         case .overview: return "概览"
         case .nodes: return "节点分析"
         case .selections: return "线路选用"
+        case .flights: return "飞行地图"
         }
     }
 
@@ -30,6 +31,7 @@ private extension DashboardSection {
         case .overview: return "square.grid.2x2"
         case .nodes: return "waveform.path.ecg"
         case .selections: return "arrow.triangle.branch"
+        case .flights: return "map"
         }
     }
 }
@@ -50,11 +52,17 @@ struct DashboardView: View {
         HStack(spacing: 0) {
             DashboardSidebar(controller: controller)
             Divider()
-            DashboardPage(section: controller.section, snapshot: controller.snapshot,
-                          history: DashboardHistory(controller.snapshot?.samples ?? []),
-                          problem: controller.problem, loading: controller.loading, refresh: controller.refresh,
-                          navigate: { controller.section = $0 })
-                .id(controller.configURL)
+            if controller.section == .flights {
+                FlightPanel(reader: controller.readerURL, configURL: controller.configURL)
+                    .id(controller.configURL)
+            } else {
+                DashboardPage(section: controller.section, snapshot: controller.snapshot,
+                              history: DashboardHistory(controller.snapshot?.samples ?? []),
+                              problem: controller.problem, loading: controller.loading, refresh: controller.refresh,
+                              requestedDecisionID: controller.requestedDecisionID,
+                              navigate: { controller.section = $0 }, focusDecision: controller.focusDecision)
+                    .id(controller.configURL)
+            }
         }
         .frame(minWidth: 835, idealWidth: 1080, maxWidth: .infinity, minHeight: 565, idealHeight: 700, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -128,7 +136,9 @@ private struct DashboardPage: View {
     let problem: String?
     let loading: Bool
     let refresh: () -> Void
+    let requestedDecisionID: String?
     let navigate: (DashboardSection) -> Void
+    let focusDecision: (String) -> Void
     @ViewState private var requested: DashboardSeries?
     @ViewState private var period = DashboardPeriod.all
     @ViewState private var search = ""
@@ -163,6 +173,8 @@ private struct DashboardPage: View {
                         switch section {
                         case .overview, .nodes:
                             if section == .overview {
+                                ManagedRoutesCard(groups: snapshot.groups, decisions: snapshot.decisionHistory,
+                                                  onSelections: { navigate(.selections) }, onDecision: focusDecision)
                                 BudgetSummary(snapshot: snapshot, history: history)
                             } else if !history.routes.isEmpty {
                                 RouteBrowser(history: history, routes: history.routes.filter { $0.matches(query) },
@@ -172,17 +184,23 @@ private struct DashboardPage: View {
                                 TrendCard(history: history, series: selection, period: $period, inNodes: section == .nodes,
                                           selectRoute: selectRoute, selectSeries: { requested = $0 })
                                 if section == .overview {
-                                    DashboardOverview(history: history, focus: selection, period: period, groups: snapshot.groups) { series in
+                                    DashboardOverview(history: history, focus: selection, period: period) { series in
                                         search = ""
                                         requested = series
                                         navigate(.nodes)
-                                    } onGroups: { navigate(.selections) }
+                                    }
                                 }
                             } else if history.routes.isEmpty {
                                 DashboardEmpty(symbol: "waveform.path.ecg", title: "暂无测速记录",
                                                detail: "手动测速或守护进程的测速记录会显示在这里。").dashboardCard()
                             }
                         case .selections:
+                            if let warning = snapshot.decisionWarning, !warning.isEmpty {
+                                Label(warning, systemImage: "exclamationmark.triangle")
+                                    .font(.callout).foregroundColor(.secondary).dashboardCard(12)
+                            }
+                            DecisionHistoryPanel(decisions: snapshot.decisionHistory, selected: snapshot.selectedDecision,
+                                                 requestedID: requestedDecisionID, onDecision: focusDecision)
                             if snapshot.groups.isEmpty {
                                 DashboardEmpty(symbol: "arrow.triangle.branch", title: "暂无线路选用记录",
                                                detail: "首次观测到策略组的选用节点后，这里会显示节点和观测时段。").dashboardCard()
@@ -193,6 +211,8 @@ private struct DashboardPage: View {
                                 }
                                 ForEach(snapshot.groups, id: \.name) { group in SelectionCard(group: group) }
                             }
+                        case .flights:
+                            EmptyView()
                         }
                     } else if problem == nil {
                         DashboardEmpty(symbol: loading ? "clock" : "tray", title: loading ? "正在读取本地记录…" : "尚未载入记录",
@@ -214,6 +234,7 @@ private struct DashboardPage: View {
             return "本期 \(DashboardFormat.date.string(from: snapshot.cycleStart)) 起 · \(DashboardFormat.date.string(from: snapshot.cycleEnd)) 结转"
         case .nodes: return "\(history.routes.count) 条测速路径 · \(history.sampleCount) 条历史记录"
         case .selections: return "选用时长截至各策略组的末次观测"
+        case .flights: return "Mihomo 内核路由的实时与历史流向"
         }
     }
 

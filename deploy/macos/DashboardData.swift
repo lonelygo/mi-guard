@@ -10,6 +10,12 @@ struct DashboardSnapshot: Decodable, Sendable {
     let lastSweep: Date?
     let samples: [LedgerSample]
     let groups: [LedgerGroup]
+    /// Optional for dashboards reading a v0.1.x helper.
+    let decisions: [DecisionRecord]?
+    let selectedDecision: DecisionRecord?
+    let decisionWarning: String?
+
+    var decisionHistory: [DecisionRecord] { decisions ?? [] }
 
     static func decode(_ data: Data) throws -> DashboardSnapshot {
         let decoder = JSONDecoder()
@@ -24,6 +30,62 @@ struct DashboardSnapshot: Decodable, Sendable {
         }
         return try decoder.decode(Self.self, from: data)
     }
+}
+
+struct DecisionRecord: Decodable, Hashable, Identifiable, Sendable {
+    let id: String
+    let at: Date
+    let source: String
+    let group: String
+    let chain: String?
+    let before: String?
+    let after: String?
+    let action: String
+    let reason: String?
+    let trigger: String?
+    let nearBestPct: Double?
+    let thresholdMbps: Double?
+    let minMbps: Double?
+    let candidates: [DecisionCandidate]?
+    let followers: [DecisionFollower]?
+
+    var evidence: [DecisionCandidate] { candidates ?? [] }
+    var followResults: [DecisionFollower] { followers ?? [] }
+}
+
+struct DecisionCandidate: Decodable, Hashable, Identifiable, Sendable {
+    var id: String { "\(node)|\(kind ?? "")|\(target ?? "")" }
+    let node: String
+    let provider: String?
+    let kind: String?
+    let target: String?
+    let mbps: Double?
+    let latencyMS: Int?
+    let attempts: Int?
+    let failures: Int?
+    let streams: Int?
+    let requestedBytes: Int64?
+    let bytes: Int64?
+    let stage: String?
+    let status: String?
+    let rank: Int?
+    let preferredBand: Bool?
+    let strategyAttempts: Int?
+    let strategyFailures: Int?
+    let historyAttempts: Int?
+    let historyFailures: Int?
+    let historySamples: Int?
+    let historyP25Mbps: Double?
+    let selected: Bool?
+}
+
+struct DecisionFollower: Decodable, Hashable, Identifiable, Sendable {
+    var id: String { group }
+    let group: String
+    let before: String?
+    let after: String?
+    let action: String
+    let reason: String?
 }
 
 struct LedgerSample: Decodable, Hashable, Sendable {

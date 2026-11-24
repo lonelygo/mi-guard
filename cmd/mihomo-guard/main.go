@@ -19,6 +19,7 @@ import (
 
 	"github.com/lonelygo/mi-guard/internal/adhoc"
 	"github.com/lonelygo/mi-guard/internal/config"
+	"github.com/lonelygo/mi-guard/internal/flight"
 	"github.com/lonelygo/mi-guard/internal/guard"
 	"github.com/lonelygo/mi-guard/internal/history"
 	"github.com/lonelygo/mi-guard/internal/mihomo"
@@ -35,7 +36,8 @@ const usage = `mihomo-guard <command> [-c guard.yaml]
   init          Write a new guard configuration
   check         Verify wiring and show live availability, current member, latency, bandwidth and tenure
   status        Show current groups and accounted usage (--probe for fresh checks)
-  history       Print a read-only JSON snapshot of recorded usage, samples and group selections
+  history       Print recorded usage, samples, selections and decisions (--decision ID for one event)
+  flights       Show regional live connections and observed traffic history (--watch to follow)
   bench         Measure managed groups, or use -g GROUP, --node NAME, -f REGEXP
                 --source FILE|URL measures an ad-hoc provider using the installed core
                 --apply selects or keeps a measured member of a manual selector
@@ -154,6 +156,8 @@ func run(ctx context.Context, args []string) error {
 	fs.StringVar(&path, "config", path, "guard YAML file")
 	var opt benchOptions
 	var live bool
+	var watch bool
+	var decisionID string
 	switch cmd {
 	case "bench":
 		fs.Int64Var(&opt.bytes, "bytes", 0, "total download bytes per node, shared across streams (overrides the per-stream cap)")
@@ -168,7 +172,11 @@ func run(ctx context.Context, args []string) error {
 		fs.BoolVar(&opt.apply, "apply", false, "select or keep the best eligible member; automatic groups are measured only")
 	case "status":
 		fs.BoolVar(&live, "probe", false, "also probe managed live-path liveness and configured geography")
-	case "init", "check", "history", "daemon", "notify-setup":
+	case "flights":
+		fs.BoolVar(&watch, "watch", false, "follow regional connections and history as newline-delimited JSON")
+	case "history":
+		fs.StringVar(&decisionID, "decision", "", "include a specific recorded decision by ID")
+	case "init", "check", "daemon", "notify-setup":
 	default:
 		return fmt.Errorf("unknown command %q\n%s", cmd, usage)
 	}
@@ -191,7 +199,7 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 	if cmd == "history" {
-		return writeDashboardHistory(os.Stdout, path)
+		return writeDashboardHistoryForDecision(os.Stdout, path, decisionID)
 	}
 	c, err := config.Load(path)
 	if err != nil {
@@ -222,9 +230,14 @@ func run(ctx context.Context, args []string) error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	sender := notify.New(c.Notifications, path, log)
 	defer sender.Close()
-	r := &guard.Runner{Cfg: c, Core: mihomo.New(c.Mihomo.Controller, c.Mihomo.Secret), Store: history.New(c.History.File, c.History.SamplesPerNode, c.Speed.BillingDay), Notify: sender.Send, Log: log}
+	r := &guard.Runner{Cfg: c, Core: mihomo.New(c.Mihomo.Controller, c.Mihomo.Secret), Store: history.New(c.History.File, c.History.SamplesPerNode, c.Speed.BillingDay), Notify: sender.Send, NotifyEvent: sender.SendEvent, Log: log}
 	if cmd == "status" {
 		return status(ctx, r, live)
+	}
+	if cmd == "flights" {
+		monitor := flight.New(c, r.Core)
+		defer monitor.Close()
+		return monitor.Display(ctx, r.Store, os.Stdout, watch)
 	}
 	f, err := config.ReadCoreFile(c.Mihomo.ConfigPath)
 	if err != nil {
@@ -245,7 +258,23 @@ func run(ctx context.Context, args []string) error {
 		if len(c.Groups) == 0 {
 			return errors.New("daemon needs at least one managed group")
 		}
-		return r.Store.WithLock(ctx, "daemon", func() error { return r.Daemon(ctx) })
+		return r.Store.WithLock(ctx, "daemon", func() error {
+			if !c.FlightMap.RecordHistory {
+				return r.Daemon(ctx)
+			}
+			collectorCtx, cancel := context.WithCancel(ctx)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				monitor := flight.New(c, r.Core)
+				defer monitor.Close()
+				monitor.Record(collectorCtx, r.Store, log)
+			}()
+			err := r.Daemon(ctx)
+			cancel()
+			<-done
+			return err
+		})
 	case "bench":
 		return bench(ctx, r, f, opt)
 	}
@@ -446,6 +475,8 @@ func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benc
 				}
 			}
 			ranked := policy.Rank(target.Current, measured, past.Samples, r.Cfg.Selection.NearBestPct)
+			target.Evidence = measured
+			target.History = past.Samples
 			outcomes, err := r.ApplyBenchTarget(ctx, target, ranked)
 			for i, outcome := range outcomes {
 				if i > 0 {

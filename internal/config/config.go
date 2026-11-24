@@ -88,7 +88,10 @@ func LoadGuard(path string) (Config, error) {
 		return c, err
 	}
 	helperPath := &c.Notifications.Helper
-	for _, p := range []*string{&c.Mihomo.ConfigPath, &c.Mihomo.StableBinary, &c.History.File, helperPath} {
+	for _, p := range []*string{&c.Mihomo.ConfigPath, &c.Mihomo.StableBinary, &c.History.File, helperPath, &c.FlightMap.CountryDB} {
+		if p == &c.FlightMap.CountryDB && *p == "" {
+			continue
+		}
 		if p == helperPath && *p == AutoNotificationHelper {
 			continue
 		}
@@ -110,6 +113,11 @@ func LoadGuard(path string) (Config, error) {
 }
 
 func (c Config) validate() error {
+	for name, code := range c.FlightMap.RouteRegions {
+		if strings.TrimSpace(name) == "" || len(code) != 2 || code[0] < 'A' || code[0] > 'Z' || code[1] < 'A' || code[1] > 'Z' || code == "ZZ" {
+			return errors.New("flight_map.route_regions needs an exact route name and uppercase two-letter region code")
+		}
+	}
 	if err := localURL(c.Mihomo.Controller, false); err != nil {
 		return fmt.Errorf("mihomo.controller: %w", err)
 	}

@@ -1,6 +1,6 @@
 # mi-guard
 
-<img src="https://raw.githubusercontent.com/lonelygo/mi-guard/main/deploy/macos/AppIcon.png" width="96" height="96" alt="mi-guard 通知助手图标">
+<img src="https://raw.githubusercontent.com/lonelygo/mi-guard/main/deploy/macos/AppIcon.png" width="96" height="96" alt="mi-guard App 图标">
 
 `mihomo-guard` 是运行在 macOS 上的带宽选线守护进程。它可以为链式代理选择前置节点，也可以直接管理普通的手动选择组，在当前线路持续降速或断线时换线。手动 `bench` 可临时测试其他地区或新的机场订阅。
 
@@ -144,15 +144,38 @@ daemon 的完整扫描、快筛和复测固定单流。以完整扫描为例，1
 
 切换时先调整 `primary-group-1` / `primary-group-2`，再验证相应的 `dialer-proxy-1` / `dialer-proxy-2` 链。第一组可按预期 Google 地区顺位尝试。验证成功后，在候选仍属于直出组的前提下，尽力同步 `direct-group-1` / `direct-group-2`。直出跟随失败只影响直出组。守护进程会接纳手动选线，并在换线前重新读取当前选择。
 
-## macOS 历史面板（0.1.4）
+## macOS App（0.2.0）
 
-从 Finder 打开 `mi-guard.app` 可查看当前 guard 配置对应的本地历史。点击全组扫描通知会打开「概览」，点击换线通知会打开「线路选用」。通过 `-c` 运行的 0.1.4 守护进程会在通知中带上配置位置。App 已经打开时，点击通知会定位到同一个窗口。
+从 Finder 打开 `mi-guard.app`。Homebrew 安装后也可用 `open "$(brew --prefix mi-guard)/libexec/mi-guard.app"`。在「文件 → 打开配置…」中选择其他 guard YAML。点击扫描通知会进入概览，点击新版换线通知会打开该次决策，并使用发出通知时的配置。
 
-- **概览**显示本账期测速流量、最近的扫描和节点带宽趋势。所选测法已知时，可比较相同路径和测法下各节点的最近结果，点击节点可进入分析。旧记录按时间列出。额度来自完整的账期账本，包括仍在预留的字节。趋势和节点统计只覆盖保留的测速样本。
-- **节点分析**可按节点和测法查看带宽、HTTP 探测延迟及单次结果。在图上点击或拖动可查看对应测量的时间和速度，macOS 13 及以上也支持悬停查看。默认四流手测与单流守护有各自的历史。旧版缺少测法信息的测速仍可查看，下载失败单独标记。
-- **线路选用**列出最近观察到的节点、最后观察时间、该次连续选用时长和最长选用记录。时长计算到最后一次观察。
+- **概览**先显示纳管线路、最近观测到的节点和选用跨度，然后是账期测速额度、最近扫描和节点带宽趋势。
+- **节点分析**按节点和测法查看吞吐量、HTTP 204 延迟及单次结果。点击或拖动图上的测量点可查看数值。默认四流手测和单流守护各有记录，旧样本缺少的测法保留为未知。
+- **线路选用**显示保持、切换、跳过和失败的记录。点选一次决策可以查看候选带宽、同档门槛、探测失败阶段及随动组结果。选用跨度截至最后一次实际观测。
+- **飞行地图**在前台每 5 秒读取 Mihomo 活跃连接。点选线路可查看策略链、活动连接数和累计字节。手动选定国家或地区作为示意起点，开启「显示目标」可查看后续路径。地图底图和地区锚点随 App 离线提供。[Natural Earth 公有领域地图数据](https://www.naturalearthdata.com/about/terms-of-use/)
 
-面板可以在 Mihomo 离线时使用。打开或刷新只读取本地文件。使用「文件 → 打开配置…」切换 guard YAML，`⌘R` 刷新。窗口回到前台时会重新读取，保持在前台时每分钟更新一次。命令行 `mihomo-guard history -c path_to_your_guard_config.yaml` 可输出同一份面板数据。
+地图优先采用内核报告的目标地区。Mihomo 配置目录已有的 `Country.mmdb` 或 `geoip.metadb` 可用于在本机定位代理对端及目标 IP。显式配置的线路地区单独显示。坐标为地区锚点；缺少位置的线路仍可在列表中查看。本机处理控制器快照，写入历史的字段为策略链名称、地区、时间段、字节和新增连接数。
+
+```yaml
+flight_map:
+  record_history: true
+  country_database: ""       # 可指定本机已有的 MMDB 文件
+  route_regions: {}          # 如 {"dialer-proxy-1": "US"}，使用内核中的准确名称
+```
+
+0.2.0 daemon 每 10 秒观察一次活跃连接，累计已观测的字节增量。「今天」「本周」「本月」按本地自然日、周一和月初划分。两个采样点之间关闭的短连接和断开前的尾部流量可能漏记，因此排行显示**已观测流量**。中断、首次采样以及重启后的空档不回填。设 `record_history: false` 可关闭后台采集。
+
+### 历史文件和命令
+
+原有 `history.file` 和相邻的 `.selections.json` 继续记录预算、测速样本和选用跨度。首次产生新决策或航线增量时，guard 在同目录创建 `<文件名>.analytics.sqlite3`，使用系统 SQLite 保存最近 1,000 次决策和 93 天的航线观测。已有配置和 JSON 可直接打开。升级前缺少的决策原因、实时航线和测法从新观测开始积累。
+
+```sh
+mihomo-guard history                    # 本地测速、选用和近期决策
+mihomo-guard history --decision ID      # 通知对应的具体决策
+mihomo-guard flights                    # 实时地区汇总及可读的历史窗口，JSON
+mihomo-guard flights --watch            # 按行输出地图快照
+```
+
+所有命令均支持 `-c path_to_your_guard_config.yaml`。「概览」「节点分析」「线路选用」从本地文件读取，`⌘R` 刷新。内核离线时，已入库的航线历史也可继续查看。
 
 ## 登录时运行与系统通知
 

@@ -25,7 +25,10 @@ type Runner struct {
 	Core   *mihomo.Client
 	Store  *history.Store
 	Notify func(kind, title, body string)
-	Log    *slog.Logger
+	// NotifyEvent links a switch notification to its durable decision record.
+	// Notify remains the compatibility path for summaries and older callers.
+	NotifyEvent func(kind, title, body, eventID string)
+	Log         *slog.Logger
 
 	geoCheck func(context.Context, config.Group) (probe.GeoResult, error)
 }

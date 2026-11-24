@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -88,6 +89,58 @@ func TestHistoryPreservesConciseProbeStatus(t *testing.T) {
 		if got := dashboardSample(model.Sample{Error: raw}).Error; got != want {
 			t.Errorf("error label %q = %q, want %q", raw, got, want)
 		}
+	}
+}
+
+func TestHistoryExportsRecentAndRequestedDecisionWithoutDependingOnAnalytics(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "guard.yaml")
+	if err := os.WriteFile(configPath, []byte("history: {file: history.json}\ngroups: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := history.New(filepath.Join(dir, "history.json"), 50, 1)
+	base := time.Now().UTC().Add(-2 * time.Hour)
+	for i := 0; i < 65; i++ {
+		threshold := 80.0
+		decision := history.Decision{ID: fmt.Sprintf("decision-%02d", i), At: base.Add(time.Duration(i) * time.Minute), Source: "manual",
+			Group: "US-WARP", Before: "node-a", After: "node-b", Action: "switched", Trigger: "manualBench",
+			NearBestPct: 20, ThresholdMbps: &threshold, Candidates: []history.DecisionCandidate{{Node: "node-b", Mbps: 100, Streams: 4, RequestedBytes: 16 << 20, Selected: true}}}
+		if err := store.RecordDecision(context.Background(), decision); errors.Is(err, history.ErrAnalyticsUnavailable) {
+			t.Skip("SQLite decision persistence is unavailable without cgo")
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out bytes.Buffer
+	if err := writeDashboardHistoryForDecision(&out, configPath, "decision-00"); err != nil {
+		t.Fatal(err)
+	}
+	var got DashboardSnapshot
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Decisions) != 60 || got.Decisions[0].ID != "decision-64" || got.SelectedDecision == nil || got.SelectedDecision.ID != "decision-00" || got.DecisionWarning != "" {
+		t.Fatalf("decision export = recent %d first %+v selected %+v warning %q", len(got.Decisions), got.Decisions[0], got.SelectedDecision, got.DecisionWarning)
+	}
+	out.Reset()
+	var missing DashboardSnapshot
+	if err := writeDashboardHistoryForDecision(&out, configPath, "expired-decision"); err != nil || json.Unmarshal(out.Bytes(), &missing) != nil ||
+		missing.SelectedDecision != nil || !strings.Contains(missing.DecisionWarning, "已过期或不存在") || len(missing.Samples) != 0 || missing.Groups == nil {
+		t.Fatalf("missing decision fallback = %s, %v", out.String(), err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "broken.json.analytics.sqlite3"), []byte("not sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brokenConfig := filepath.Join(dir, "broken.yaml")
+	if err := os.WriteFile(brokenConfig, []byte("history: {file: broken.json}\ngroups: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	var broken DashboardSnapshot
+	if err := writeDashboardHistory(&out, brokenConfig); err != nil || json.Unmarshal(out.Bytes(), &broken) != nil ||
+		broken.DecisionWarning == "" || len(broken.Samples) != 0 || broken.Groups == nil {
+		t.Fatalf("corrupt analytics fallback = %s, %v", out.String(), err)
 	}
 }
 
@@ -221,7 +274,7 @@ groups: [{name: primary, chain: "Exit / JP"}, {name: standalone, mode: selector}
 			t.Errorf("wire keys %v, want %v", actual, want)
 		}
 	}
-	checkKeys(out, "budgetBytes usedBytes pendingBytes cycleStart cycleEnd lastSweep samples groups")
+	checkKeys(out, "budgetBytes usedBytes pendingBytes cycleStart cycleEnd lastSweep samples groups decisions")
 	checkKeys(wire.Samples[0], "time node provider scope kind mbps latencyMS bytes attempts failures error streams requestedBytes target")
 	checkKeys(wire.Groups[1], "name chain configured node since lastSeen guardSelected longestNode longestSeconds")
 }

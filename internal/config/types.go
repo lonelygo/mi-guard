@@ -15,6 +15,7 @@ type Config struct {
 	Speed         Speed         `yaml:"speedtest"`
 	Selection     Selection     `yaml:"selection"`
 	History       History       `yaml:"history"`
+	FlightMap     FlightMap     `yaml:"flight_map"`
 	Notifications Notifications `yaml:"notifications"`
 	Groups        []Group       `yaml:"groups"`
 }
@@ -78,6 +79,11 @@ func (s Selection) Follower(g Group) string {
 type History struct {
 	File           string `yaml:"file"`
 	SamplesPerNode int    `yaml:"samples_per_node"`
+}
+type FlightMap struct {
+	RecordHistory bool              `yaml:"record_history"`
+	CountryDB     string            `yaml:"country_database"`
+	RouteRegions  map[string]string `yaml:"route_regions"`
 }
 type Notifications struct {
 	Enabled bool   `yaml:"enabled"`

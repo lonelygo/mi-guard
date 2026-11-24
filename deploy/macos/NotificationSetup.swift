@@ -11,7 +11,7 @@ enum HelperMode: Equatable {
     case check
     case dashboard(config: String?)
     case authorize
-    case send(kind: String, title: String, body: String)
+    case send(kind: String, title: String, body: String, eventID: String?)
 
     init(arguments raw: [String]) throws {
         // LaunchServices can prepend a legacy process serial number to the arguments.
@@ -31,24 +31,32 @@ enum HelperMode: Equatable {
                 }
                 return arguments[i + 1]
             }
-            self = try .send(kind: value("--kind"), title: value("--title"), body: value("--body"))
+            let eventID: String?
+            if let index = arguments.firstIndex(of: "--event-id"), index + 1 < arguments.count, !arguments[index + 1].isEmpty {
+                eventID = arguments[index + 1]
+            } else {
+                eventID = nil
+            }
+            self = try .send(kind: value("--kind"), title: value("--title"), body: value("--body"), eventID: eventID)
         } else {
-            throw HelperError("usage: mi-guard-notify [--dashboard [-c guard.yaml]] | --check | --authorize | --send --kind KIND --title TITLE --body BODY")
+            throw HelperError("usage: mi-guard-notify [--dashboard [-c guard.yaml]] | --check | --authorize | --send --kind KIND --title TITLE --body BODY [--event-id ID]")
         }
     }
 }
 
 enum DashboardSection: String, CaseIterable {
-    case overview, nodes, selections
+    case overview, nodes, selections, flights
 }
 
 struct DashboardDestination: Equatable {
     let section: DashboardSection
     let configURL: URL?
+    let decisionID: String?
 
     init?(action: String, thread: String, userInfo: [AnyHashable: Any]) {
         guard action == UNNotificationDefaultActionIdentifier else { return nil }
         section = thread == "mi-guard.switch" ? .selections : .overview
+        decisionID = (userInfo["decisionID"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         if let path = userInfo["guardConfigPath"] as? String, path.hasPrefix("/") {
             configURL = URL(fileURLWithPath: path).standardizedFileURL
         } else {
