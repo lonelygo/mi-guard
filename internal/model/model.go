@@ -31,6 +31,7 @@ type Proxy struct {
 type Sample struct {
 	At        time.Time `json:"time"`
 	Node      string    `json:"node"`
+	ProxyType string    `json:"-"` // controller metadata for the live bench result
 	Provider  string    `json:"provider,omitempty"`
 	Scope     string    `json:"scope"` // front, or a chain name for a heartbeat
 	Kind      string    `json:"kind"`  // sweep, quick, confirm, bench, heartbeat

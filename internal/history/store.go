@@ -32,12 +32,13 @@ type Store struct {
 }
 
 type Snapshot struct {
-	Samples      []model.Sample       `json:"samples"`
-	Heartbeats   []HeartbeatAggregate `json:"heartbeats,omitempty"`
-	UsedBytes    int64                `json:"used_bytes"`
-	PendingBytes int64                `json:"pending_bytes"`
-	CycleStart   time.Time            `json:"cycle_start"`
-	LastSweep    time.Time            `json:"last_sweep,omitempty"`
+	Samples      []model.Sample             `json:"samples"`
+	Heartbeats   []HeartbeatAggregate       `json:"heartbeats,omitempty"`
+	Selections   map[string]SelectionTenure `json:"selections,omitempty"`
+	UsedBytes    int64                      `json:"used_bytes"`
+	PendingBytes int64                      `json:"pending_bytes"`
+	CycleStart   time.Time                  `json:"cycle_start"`
+	LastSweep    time.Time                  `json:"last_sweep,omitempty"`
 }
 
 type HeartbeatAggregate struct {
@@ -144,7 +145,8 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 			}
 		}
 		result = snapshotOf(state)
-		return nil
+		result.Selections, err = s.readSelections()
+		return err
 	})
 	return result, err
 }
@@ -320,35 +322,44 @@ func (s *Store) loadCurrent() (diskState, bool, error) {
 }
 
 func (s *Store) load() (diskState, bool, error) {
-	file, err := os.Open(s.file)
+	var state diskState
+	exists, err := readHistoryJSON(s.file, &state)
+	return state, exists, err
+}
+
+func readHistoryJSON(path string, into any) (bool, error) {
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return diskState{}, false, nil
+		return false, nil
 	}
 	if err != nil {
-		return diskState{}, false, fmt.Errorf("open history: %w", err)
+		return false, fmt.Errorf("open history: %w", err)
 	}
 	defer file.Close()
 	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
-	var state diskState
-	if err := decoder.Decode(&state); err != nil {
-		return diskState{}, false, fmt.Errorf("decode history: %w", err)
+	if err := decoder.Decode(into); err != nil {
+		return false, fmt.Errorf("decode history: %w", err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
 			err = errors.New("multiple JSON values")
 		}
-		return diskState{}, false, fmt.Errorf("decode history: %w", err)
+		return false, fmt.Errorf("decode history: %w", err)
 	}
-	return state, true, nil
+	return true, nil
 }
 
 func (s *Store) write(state diskState) error {
+	return s.writeHistoryJSON(s.file, state)
+}
+
+func (s *Store) writeHistoryJSON(path string, value any) error {
 	if err := s.ensureDir(); err != nil {
 		return err
 	}
-	dir := filepath.Dir(s.file)
+	dir := filepath.Dir(path)
 	temp, err := os.CreateTemp(dir, ".speed-history-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temporary history: %w", err)
@@ -361,7 +372,7 @@ func (s *Store) write(state diskState) error {
 	}
 	encoder := json.NewEncoder(temp)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(state); err != nil {
+	if err := encoder.Encode(value); err != nil {
 		temp.Close()
 		return fmt.Errorf("encode history: %w", err)
 	}
@@ -372,7 +383,7 @@ func (s *Store) write(state diskState) error {
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("close history: %w", err)
 	}
-	if err := os.Rename(tempName, s.file); err != nil {
+	if err := os.Rename(tempName, path); err != nil {
 		return fmt.Errorf("replace history: %w", err)
 	}
 	return nil

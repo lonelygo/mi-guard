@@ -119,6 +119,14 @@ func (c Config) validate() error {
 	if c.Mihomo.TestGroup == "" {
 		return errors.New("missing mihomo.test_group")
 	}
+	for front, follower := range p.FollowGroups {
+		if strings.TrimSpace(front) == "" || strings.TrimSpace(follower) == "" || front == follower {
+			return fmt.Errorf("selection.follow_groups needs two distinct group names, got %s -> %s", model.QuoteName(front), model.QuoteName(follower))
+		}
+		if front == c.Mihomo.TestGroup || follower == c.Mihomo.TestGroup {
+			return fmt.Errorf("selection.follow_groups cannot use the dedicated test group %s", model.QuoteName(c.Mihomo.TestGroup))
+		}
+	}
 	roles := map[string]bool{c.Mihomo.TestGroup: true}
 	for _, g := range c.Groups {
 		if g.Name == "" || g.MinMbps < 0 || math.IsNaN(g.MinMbps) || math.IsInf(g.MinMbps, 0) {

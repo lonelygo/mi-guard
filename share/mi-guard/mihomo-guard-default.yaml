@@ -47,11 +47,16 @@ selection:
   severe_drop_pct: 20         # 降速确认门槛（大于 0、小于 100）。默认当前速度降至历史正常中位数的 80% 即复测。
   near_best_pct: 20           # 与本轮最快节点的容差（0 到 100）。默认达到本轮最快速度的 80% 即进入同一优先档。
   slow_confirmations: 2       # 至少 2 次，包含初次观察到的降速。
-  sync_direct_on_warp_switch: true # 链式前置切换成功后，尽力让其 direct 组选中同名节点。
+  sync_direct_on_warp_switch: true # 前置实际切换成功后，尝试让对应的手动组选择同一节点。
+  follow_groups: {}           # 键为前置组全名，值为等价普通组全名；同一前置的映射优先于旧的 groups[].direct。
+  # 例如把上一行替换成以下映射，名称须与 Mihomo 完全一致。
+  # follow_groups:
+  #   primary-group-1: direct-group-1
+  #   primary-group-2: direct-group-2
   max_sample_age: 36h         # 选取复测备选时可复用的历史带宽样本年龄上限，须大于 0。
 
 history:
-  file: speed-history.json    # 保存测速历史、已用流量和预留量。默认与当前 guard 配置同目录。
+  file: speed-history.json    # 测速与流量账本。选用时长保存在同目录的 <文件名>.selections.json。
   samples_per_node: 50       # 每个 provider 和节点名组合保留的最近带宽样本数，至少 1 条。
 
 notifications:

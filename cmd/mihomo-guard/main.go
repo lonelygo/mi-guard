@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
@@ -32,11 +33,11 @@ const usage = `mihomo-guard <command> [-c guard.yaml]
   -h, --help     Show this help (use <command> --help for its options)
 
   init          Write a new guard configuration
-  check         Verify controller, isolated measurement route and managed groups
+  check         Verify wiring and show live availability, current member, latency, bandwidth and tenure
   status        Show current groups and accounted usage (--probe for fresh checks)
   bench         Measure managed groups, or use -g GROUP, --node NAME, -f REGEXP
                 --source FILE|URL measures an ad-hoc provider using the installed core
-                --apply explicitly applies results to managed selectors
+                --apply selects or keeps a measured member of a manual selector
   daemon        Run heartbeats, capped speed checks and failover
   notify-setup  Request macOS notification permission for the bundled helper
 `
@@ -126,13 +127,13 @@ func run(ctx context.Context, args []string) error {
 	case "bench":
 		fs.Int64Var(&opt.bytes, "bytes", 0, "total response-byte cap per node (default from config)")
 		fs.IntVar(&opt.streams, "streams", 0, "parallel downloads per node (1–8, share --bytes)")
-		fs.StringVar(&opt.group, "g", "", "group name")
-		fs.StringVar(&opt.group, "group", "", "group name")
+		fs.StringVar(&opt.group, "g", "", "group or dialer chain; exact name or unique substring")
+		fs.StringVar(&opt.group, "group", "", "group or dialer chain; exact name or unique substring")
 		fs.StringVar(&opt.filter, "f", "", "node name regexp")
 		fs.StringVar(&opt.filter, "filter", "", "node name regexp")
 		fs.Var(&opt.nodes, "node", "exact node name (repeatable)")
 		fs.Var(&opt.sources, "source", "local or HTTP(S) provider YAML (repeatable)")
-		fs.BoolVar(&opt.apply, "apply", false, "apply the result to managed groups")
+		fs.BoolVar(&opt.apply, "apply", false, "select or keep the best eligible member; automatic groups are measured only")
 	case "status":
 		fs.BoolVar(&live, "probe", false, "also probe managed live-path liveness and configured geography")
 	case "init", "check", "daemon", "notify-setup":
@@ -186,6 +187,9 @@ func run(ctx context.Context, args []string) error {
 	if cmd == "notify-setup" {
 		return notify.Authorize(ctx, c.Notifications.Helper)
 	}
+	if cmd == "bench" {
+		fmt.Fprintln(os.Stderr, "正在读取测速候选…")
+	}
 	if len(opt.sources) > 0 {
 		if opt.apply || opt.group != "" {
 			return errors.New("--source measures provider nodes; use --filter or --node to restrict the list")
@@ -211,55 +215,21 @@ func run(ctx context.Context, args []string) error {
 	if err = f.CheckBench(c.Mihomo); err != nil {
 		return err
 	}
-	if cmd == "daemon" || cmd == "check" || opt.apply {
-		groups := c.Groups
-		if opt.apply && opt.group != "" {
-			g, known := r.Managed(opt.group)
-			if !known {
-				return fmt.Errorf("--apply requires a managed group, got %s", model.QuoteName(opt.group))
-			}
-			groups = []config.Group{g}
-		}
-		if err = f.CheckManaged(groups); err != nil {
+	if cmd == "daemon" || cmd == "check" {
+		if err = f.CheckManaged(c.Groups); err != nil {
 			return err
 		}
 	}
 	switch cmd {
 	case "check":
-		v, err := r.Core.Version(ctx)
-		if err != nil {
-			return err
-		}
-		p, err := r.Core.Proxy(ctx, c.Mihomo.TestGroup)
-		if err != nil {
-			return err
-		}
-		if p.Type != "Selector" || len(p.All) == 0 {
-			return errors.New("live core is missing the configured test selector or its candidates")
-		}
-		if err := r.CheckIngress(ctx, c.Mihomo.TestProxy, c.Speed.URL, c.Mihomo.TestGroup, p.Now); err != nil {
-			return fmt.Errorf("cannot verify live test listener %s for current member %s: %w", c.Mihomo.TestProxy, model.QuoteName(p.Now), err)
-		}
-		for _, g := range c.Groups {
-			nodes, e := checkManagedGroup(ctx, r, g)
-			if e != nil {
-				return e
-			}
-			if g.Mode == config.GroupModeSelector {
-				fmt.Printf("%s: %d candidates\n", g.Name, len(nodes))
-			} else {
-				fmt.Printf("%s via %s: %d candidates\n", g.ProbeTarget(), g.Name, len(nodes))
-			}
-		}
-		fmt.Printf("ready: Mihomo %s, %s (%d members)\n", v, p.Name, len(p.All))
-		return nil
+		return check(ctx, r)
 	case "daemon":
 		if len(c.Groups) == 0 {
 			return errors.New("daemon needs at least one managed group")
 		}
 		return r.Store.WithLock(ctx, "daemon", func() error { return r.Daemon(ctx) })
 	case "bench":
-		return bench(ctx, r, opt)
+		return bench(ctx, r, f, opt)
 	}
 	return nil
 }
@@ -281,7 +251,11 @@ func status(ctx context.Context, r *guard.Runner, live bool) error {
 	out := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(out, "GROUP\tCURRENT\tMEMBERS\tPROBE")
 	for _, g := range r.Cfg.Groups {
-		for _, name := range []string{g.Name, g.Direct} {
+		direct := g.Direct
+		if mapped := r.Cfg.Selection.FollowGroups[g.Name]; mapped != "" {
+			direct = mapped
+		}
+		for _, name := range []string{g.Name, direct} {
 			if name == "" {
 				continue
 			}
@@ -348,50 +322,66 @@ func checkManagedGroup(ctx context.Context, r *guard.Runner, g config.Group) ([]
 	return r.Candidates(ctx, g.Name)
 }
 
-func bench(ctx context.Context, r *guard.Runner, o benchOptions) error {
+func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benchOptions) error {
 	re, err := regexp.Compile(o.filter)
 	if err != nil {
 		return fmt.Errorf("--filter: %w", err)
 	}
-	var groups []string
+	var queries []string
 	switch {
 	case o.group != "":
-		groups = []string{o.group}
+		queries = []string{o.group}
 	case len(o.nodes) > 0 || o.filter != "" || len(o.sources) > 0:
-		groups = []string{r.Cfg.Mihomo.TestGroup}
+		if o.apply {
+			return errors.New("use -g GROUP with --apply when filtering nodes")
+		}
+		queries = []string{r.Cfg.Mihomo.TestGroup}
 	default:
 		for _, g := range r.Cfg.Groups {
-			groups = append(groups, g.Name)
+			queries = append(queries, g.Name)
 		}
 	}
-	if len(groups) == 0 {
+	if len(queries) == 0 {
 		return errors.New("choose a group, --filter or --node")
 	}
-	members := map[string][]string{}
-	previous := map[string]string{}
+	var targets []guard.BenchTarget
+	members := make(map[string][]string)
 	var nodes []string
-	for _, group := range groups {
-		if o.apply {
-			if _, ok := r.Managed(group); !ok {
-				return fmt.Errorf("--apply requires a managed selector, got %s", model.QuoteName(group))
-			}
-			p, e := r.Core.Proxy(ctx, group)
-			if e != nil {
-				return e
-			}
-			previous[group] = p.Now
+	for _, query := range queries {
+		target, err := r.ResolveBenchTarget(ctx, query)
+		if err != nil {
+			return err
 		}
-		names, e := r.Candidates(ctx, group)
-		if e != nil {
-			return e
+		name := target.Group.Name
+		if o.group == "" && name != query {
+			return fmt.Errorf("configured selector %s was not found by its exact name", model.QuoteName(query))
+		}
+		if o.apply {
+			if name == r.Cfg.Mihomo.TestGroup {
+				return errors.New("the dedicated test selector cannot be an --apply target")
+			}
+			if _, managed := r.Managed(name); managed && target.Type == "Selector" {
+				if err := wiring.CheckManaged([]config.Group{target.Group}); err != nil {
+					return err
+				}
+			}
+		}
+		if target.Group.Chain != "" {
+			fmt.Fprintf(os.Stderr, "%s → 前置组 %s\n", displayText(target.Group.Chain), displayText(name))
+		} else if o.group != "" {
+			fmt.Fprintf(os.Stderr, "测速组 %s (%s)\n", displayText(name), displayText(target.Type))
+		}
+		names, err := r.BenchCandidates(ctx, target, o.apply)
+		if err != nil {
+			return err
 		}
 		for _, n := range names {
-			if !re.MatchString(n) || (len(o.nodes) > 0 && !slices.Contains(o.nodes, n)) {
-				continue
+			if re.MatchString(n) && (len(o.nodes) == 0 || slices.Contains(o.nodes, n)) {
+				members[name] = append(members[name], n)
+				nodes = append(nodes, n)
 			}
-			members[group] = append(members[group], n)
-			nodes = append(nodes, n)
 		}
+		targets = append(targets, target)
 	}
 	for _, exact := range o.nodes {
 		if !slices.Contains(nodes, exact) {
@@ -401,66 +391,73 @@ func bench(ctx context.Context, r *guard.Runner, o benchOptions) error {
 	if len(nodes) == 0 {
 		return errors.New("no matching physical candidates")
 	}
-	past, err := r.Store.Snapshot(ctx)
+	var past history.Snapshot
+	if o.apply {
+		past, err = r.Store.Snapshot(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	endpoint, err := url.Parse(r.Cfg.Speed.URL)
 	if err != nil {
 		return err
 	}
-	results, scanErr := r.Scan(ctx, nodes, "bench", r.Cfg.Speed.SweepBytes)
-	printResults(results)
+	fmt.Fprintf(os.Stderr, "下载目标 %s · 每节点 %d 流 · 上限 %s · 超时 %s\n", displayText(endpoint.Host), r.Cfg.Speed.Streams, byteCount(r.Cfg.Speed.SweepBytes), r.Cfg.Speed.Timeout)
+	progress := newBenchProgress(os.Stderr, stderrColumns())
+	results, scanErr := r.ScanWithProgress(ctx, nodes, "bench", r.Cfg.Speed.SweepBytes, progress.update)
+	progress.close()
+	printResults(os.Stdout, results)
 	if scanErr != nil {
 		return scanErr
 	}
-	count := 0
-	for _, s := range results {
-		if s.Mbps > 0 && s.Error == "" {
-			count++
-		}
-	}
-	if count == 0 {
-		return errors.New("all measured candidates failed")
-	}
 	if o.apply {
-		for _, name := range groups {
-			g, _ := r.Managed(name)
+		followed := make(map[string]bool)
+		for _, target := range targets {
+			name := target.Group.Name
+			if followed[name] {
+				continue
+			}
 			var measured []model.Sample
 			for _, s := range results {
 				if slices.Contains(members[name], s.Node) {
 					measured = append(measured, s)
 				}
 			}
-			ranked := policy.Rank(previous[name], measured, past.Samples, r.Cfg.Selection.NearBestPct)
-			if len(ranked) == 0 {
-				return fmt.Errorf("no working candidate for %s", model.QuoteName(name))
+			ranked := policy.Rank(target.Current, measured, past.Samples, r.Cfg.Selection.NearBestPct)
+			outcomes, err := r.ApplyBenchTarget(ctx, target, ranked)
+			for i, outcome := range outcomes {
+				if i > 0 {
+					fmt.Print("随动 · ")
+					if outcome.Action == "switched" || outcome.Action == "kept" {
+						followed[outcome.Group] = true
+					}
+				}
+				printSelection(outcome)
 			}
-			selected, e := r.Apply(ctx, g, previous[name], ranked)
-			if e != nil {
-				return e
+			if err != nil {
+				return err
 			}
-			fmt.Printf("selected %s -> %s\n", name, selected)
 		}
+	}
+	if !slices.ContainsFunc(results, func(s model.Sample) bool { return s.Mbps > 0 && s.Error == "" }) {
+		return errors.New("all measured candidates failed")
 	}
 	return nil
 }
 
-func printResults(in []model.Sample) {
-	rows := slices.Clone(in)
-	slices.SortStableFunc(rows, func(a, b model.Sample) int {
-		if a.Mbps > b.Mbps {
-			return -1
-		}
-		if a.Mbps < b.Mbps {
-			return 1
-		}
-		return strings.Compare(a.Node, b.Node)
-	})
-	out := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(out, "NODE\tDOWNLOAD Mbps\tPROBE ms\tFAILURES\tBYTES\tRESULT")
-	for _, s := range rows {
-		result := s.Error
-		if result == "" {
-			result = "ok"
-		}
-		fmt.Fprintf(out, "%s\t%.3f\t%d\t%d/%d\t%d\t%s\n", s.Node, s.Mbps, s.LatencyMS, s.Failures, s.Attempts, s.Bytes, result)
+func printSelection(result guard.SelectionResult) {
+	name := displayText(result.Group)
+	reason := displayText(result.Reason)
+	note := ""
+	if reason != "" {
+		note = "（" + reason + "）"
 	}
-	out.Flush()
+	switch result.Action {
+	case "switched":
+		fmt.Printf("切换 %s：%s → %s%s\n", name, displayText(result.Before), displayText(result.After), note)
+	case "kept":
+		fmt.Printf("保持 %s：%s%s\n", name, displayText(result.After), note)
+	case "skipped":
+		fmt.Printf("跳过 %s：%s\n", name, reason)
+	}
 }

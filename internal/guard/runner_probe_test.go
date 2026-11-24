@@ -16,7 +16,10 @@ func TestScanPersistsConciseProbeFailuresAndContinues(t *testing.T) {
 	fixture.failing["a"], fixture.failing["b"] = true, true
 	runner := testRunner(t, fixture, server)
 	runner.Cfg.Speed.MonthlyBytes = 2048
-	samples, err := runner.Scan(context.Background(), []string{"a", "b"}, "bench", 512)
+	var progress []ScanProgress
+	samples, err := runner.ScanWithProgress(context.Background(), []string{"a", "a", "b"}, "bench", 512, func(e ScanProgress) {
+		progress = append(progress, e)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +30,15 @@ func TestScanPersistsConciseProbeFailuresAndContinues(t *testing.T) {
 	if len(samples) != 2 || len(snapshot.Samples) != 2 || snapshot.UsedBytes != 0 || snapshot.PendingBytes != 0 {
 		t.Fatalf("scan produced %d samples, snapshot = %+v", len(samples), snapshot)
 	}
+	if len(progress) != 4 {
+		t.Fatalf("expected start and settled result per unique node: %+v", progress)
+	}
 	for i, got := range samples {
+		before, after := progress[2*i], progress[2*i+1]
+		if before.Total != 2 || before.Completed != i || before.Node != got.Node || before.Result != nil ||
+			after.Total != 2 || after.Completed != i+1 || after.Result == nil || *after.Result != got {
+			t.Fatalf("unexpected progress around %s: %+v then %+v", got.Node, before, after)
+		}
 		if got.Error != "204 probe: HTTP 504" || got.Failures != 1 || got.Attempts != 1 || got.Bytes != 0 || got.Mbps != 0 {
 			t.Fatalf("unexpected failed probe: %+v", got)
 		}

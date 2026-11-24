@@ -51,12 +51,28 @@ type Speed struct {
 	BillingDay   int           `yaml:"billing_day"`
 }
 type Selection struct {
-	SevereDropPct     float64       `yaml:"severe_drop_pct"`
-	NearBestPct       float64       `yaml:"near_best_pct"`
-	SlowConfirmations int           `yaml:"slow_confirmations"`
-	SyncDirect        bool          `yaml:"sync_direct_on_warp_switch"`
-	MaxAge            time.Duration `yaml:"max_sample_age"`
+	SevereDropPct     float64           `yaml:"severe_drop_pct"`
+	NearBestPct       float64           `yaml:"near_best_pct"`
+	SlowConfirmations int               `yaml:"slow_confirmations"`
+	SyncDirect        bool              `yaml:"sync_direct_on_warp_switch"`
+	FollowGroups      map[string]string `yaml:"follow_groups"`
+	MaxAge            time.Duration     `yaml:"max_sample_age"`
 }
+
+// Follower returns the selector to mirror after a verified primary change.
+func (s Selection) Follower(g Group) string {
+	if !s.SyncDirect {
+		return ""
+	}
+	if name := s.FollowGroups[g.Name]; name != "" {
+		return name
+	}
+	if g.Mode == GroupModeSelector {
+		return ""
+	}
+	return g.Direct
+}
+
 type History struct {
 	File           string `yaml:"file"`
 	SamplesPerNode int    `yaml:"samples_per_node"`

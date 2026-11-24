@@ -39,7 +39,15 @@ cat  "$(brew --prefix mi-guard)/share/mi-guard/mihomo-overlay.yaml"
 
 初次 `init` 后，将 `mihomo.config_path` 改为正在使用的 Mihomo 主配置路径，按实际组名填写 `groups`。使用 `bench --source` 时，还需将 `mihomo.stable_binary` 指向可执行的 Mihomo 内核。在线守护连接 `mihomo.controller` 指定的现有内核。文件路径支持 `~/`，相对路径以 guard 配置所在目录为基准。
 
-以第一组为例，`name: primary-group-1` 指向 guard 可写的前置选择组。Mihomo 中名为 `dialer-proxy-1` 的链节点通过 `dialer-proxy: primary-group-1` 使用这个组。可选的 `direct-group-1` 会跟随选择同名节点，只管理前置时将 `direct` 留空。
+以第一组为例，`name: primary-group-1` 指向 guard 可写的前置选择组。Mihomo 中名为 `dialer-proxy-1` 的链节点通过 `dialer-proxy: primary-group-1` 使用这个组。可在 guard 配置的 `selection` 下按完整组名指定随动关系。已有的 `groups[].direct` 继续生效，同一前置组优先使用 `follow_groups` 中的值。
+
+```yaml
+selection:
+  sync_direct_on_warp_switch: true
+  follow_groups:
+    primary-group-1: direct-group-1
+    primary-group-2: direct-group-2
+```
 
 在 **Mihomo 主配置**中，把接线示例的策略组和监听器分别加入现有的 `proxy-groups`、`listeners` 列表，并将 `proxy-providers-1` / `proxy-providers-2` 改为实际的 provider 名称。若主配置由订阅工具生成，请把这些条目维护在工具的持久覆写配置里。默认测速监听为 `127.0.0.1:17987`，测速组 `mi-guard-bench` 专供该监听器使用。
 
@@ -52,7 +60,9 @@ mihomo-guard status
 mihomo-guard check
 ```
 
-`check` 核对生效的监听绑定、纳管组、链式前置引用和测速路径。`status` 显示当前组选择、账期用量及样本数，`status --probe` 还会检查实际链路或选择组，并显示已启用的地区校验结果。
+`check` 核对生效的监听和链路，按前置组显示当前节点、可用候选数、HTTP 延迟和最近带宽。可用数和延迟来自本次轻量 HTTP 探测，组间重叠节点只探测一次。带宽来自同一节点、供应商和路径的下载样本，附测量时间距今多久。运行 `check` 无需重新下载。
+
+选用时长从 guard 确认换线或首次观察到该节点时算起，同组也会显示有记录以来选用最久的节点。外部手动换线会在下次观察时被发现。选线记录写在 `history.file` 同目录的 `<文件名>.selections.json`，可跨重启和账期使用。`status` 显示当前选择和账期用量，`status --probe` 还会探测实际链路和已配置的出口地区。
 
 地区监听报 `connection refused` 时，先看 **Mihomo 内核启动或重载时的日志**。YAML 中存在 `listeners` 条目，只说明配置声明了这个端口。如果日志显示 `bind: address already in use`，说明当时端口已被占用，Mihomo 创建监听失败。解决占用后重新加载配置，再运行 `mihomo-guard check`。如果改用空闲端口，同时更新 Mihomo 的 `listeners[].port` 和对应 guard 组的 `geo_proxy`。
 
@@ -89,11 +99,20 @@ mihomo-guard bench --filter 'JP' --bytes 4194304 --streams 4
 mihomo-guard bench --source path_to_your_provider.yaml -f 'JP|SG'
 mihomo-guard bench --source 'https://example.org/subscription' --filter 'US'
 
-# 主动把结果应用到一个已纳管的链式前置组
-mihomo-guard bench -g primary-group-1 --apply
+# 用链名测试并切换前置组，终端会给出前置和随动组各自的结果
+mihomo-guard bench -g dialer-proxy-1 --apply
+
+# 临时测试普通策略组；唯一匹配即可省略 emoji 或只输入部分名称
+mihomo-guard bench -g '日本' --apply
 ```
 
-无参数的 `bench` 测 `groups` 中的所有纳管组。在线模式从独立测速组可达的物理成员中选取候选，可以在接线示例的 `use` 列表加入其他已加载的 provider。每次只选一个测速节点，下载后恢复测速组原选择。每条下载连接在发出请求前，都通过运行中内核的连接表核对实际 selector 和节点，接线错误会中止本轮。默认只输出结果、保存历史及计费，显式 `--apply` 会执行业务组切换。手动指定地区、节点或正则时使用自己的实际名称。
+无参数的 `bench` 测 `groups` 中的所有纳管组。`-g` 优先匹配完整名称，其次匹配唯一的名称子串，英文字母忽略大小写。多个组或链命中时，命令会列出候选并在下载前退出。`--node` 仍按完整节点名匹配，`--filter` 仍使用正则表达式。
+
+指定链名会测速该链的前置组。对普通组使用 `--apply` 无需先把它加入 daemon 的 `groups`。手动选择组只切换到它可以直接选择的合格成员。自动组也会出测速结果，并提示跳过切换。前置实际换线后，guard 才尝试让已配置的随动组选中同一节点。每次切换、保持或跳过都会打印组名和结果。选优沿用下节的 `near_best_pct` 策略。
+
+终端会立即显示当前节点、完成数、用时和预计剩余时间，每测完一个节点即显示其结果。进度写入标准错误，按下载速度排序的最终表格写入标准输出，方便重定向。表中 `Mbps` 为每秒百万比特，`MiB/s` 为每秒 1,048,576 字节，`HTTP ms` 为 204 探测延迟。`FAIL/TRY` 统计本轮应用层探测和下载的失败次数与尝试次数。
+
+在线模式只测专用测速组可达的物理节点。每条下载连接在发出请求前都会核对实际 selector 和节点，测完会恢复测速组原选择。与其他测速工具比较时，请选同一节点、下载地址、并发数、字节额度和超时。guard 默认从 Cloudflare 单流下载，每节点最多 4 MiB。clash-speedtest v1.8.8 默认从 Google 下载，每节点 4 流、目标 50 MiB。它在界面上显示的 `MB/s` 按 1024 进制换算，可直接对照这里的 `MiB/s` 列。[clash-speedtest 默认参数](https://github.com/faceair/clash-speedtest/blob/v1.8.8/main.go#L32-L38) · [上游速度单位](https://github.com/faceair/clash-speedtest/blob/v1.8.8/speedtester/speedtester.go#L420-L431)
 
 `--source` 接受带顶层 `proxies` 列表的 Mihomo YAML，可重复使用。它用配置中 `stable_binary` 指定的 Mihomo 启动临时核心。临时核心关闭 TUN，通过临时回环监听和独立 selector 串行测速，退出后回收进程和临时文件。独立模式会核对启动后的版本，默认要求正式版。需要试验 alpha 时可显式设置 `mihomo.allow_prerelease: true`。两个模式共享同一个 guard 配置的账期预算。若系统级 TUN 接管其他进程流量，使用独立实例测试前应确认该核心进程到机场服务器的连接直出，或采用在线测速组。
 

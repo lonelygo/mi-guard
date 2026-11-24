@@ -14,6 +14,7 @@ import http.client
 import http.server
 import json
 import os
+import select
 import signal
 import socket
 import socketserver
@@ -415,6 +416,17 @@ def interrupt_active_bench(guard: Path, config: Path) -> str:
             output, _ = process.communicate()
             raise AssertionError(f"bench did not begin a download:\n{output}")
         time.sleep(0.01)
+    # The running node must be visible before the transfer finishes or Ctrl+C.
+    assert process.stdout is not None
+    if not select.select([process.stdout], [], [], 0.5)[0]:
+        process.kill()
+        process.communicate()
+        raise AssertionError("no live progress while bench was downloading")
+    progress = os.read(process.stdout.fileno(), 16384).decode()
+    if "0/1" not in progress or "测速中 Node Slow" not in progress:
+        process.kill()
+        process.communicate()
+        raise AssertionError(f"running node missing from initial progress:\n{progress}")
     time.sleep(0.08)
     process.send_signal(signal.SIGINT)
     try:
@@ -425,7 +437,7 @@ def interrupt_active_bench(guard: Path, config: Path) -> str:
         raise AssertionError(f"bench did not stop after SIGINT:\n{output}")
     if process.returncode != 0:
         raise AssertionError(f"cancelled bench exit {process.returncode}:\n{output}")
-    return output
+    return progress + output
 
 
 def write_core_config(
@@ -522,6 +534,8 @@ proxy-groups:
   - {{name: Mirror, type: select, use: [synthetic], filter: '^Node (Dead|Slow|Fast)$'}}
   - {{name: 'HK/TW', type: select, use: [synthetic], filter: '^(HK Dead|HK Slow|TW Fast)$'}}
   - {{name: Other Region, type: select, use: [synthetic], filter: '^Node Manual$'}}
+  - {{name: '🌐 普通选线', type: select, use: [synthetic], filter: '^Node (Slow|Manual)$'}}
+  - {{name: '🧭 自动选线', type: url-test, use: [synthetic], filter: '^Node Manual$', url: 'http://127.0.0.1:1/204', interval: 3600, lazy: true}}
   - {{name: mi-guard-bench, type: select, use: [synthetic]}}
   - {{name: stale-live-bench, type: select, use: [synthetic]}}
 listeners:
@@ -595,6 +609,7 @@ selection:
   near_best_pct: 20
   slow_confirmations: 2
   sync_direct_on_warp_switch: true
+  follow_groups: {{Managed: Mirror}}
   max_sample_age: 36h
 history:
   file: {json.dumps(str(history))}
@@ -607,7 +622,6 @@ notifications:
 groups:
   - name: Managed
     chain: Chain
-    direct: Mirror
     exclude_regex: "^$"
   - name: HK/TW
     mode: selector
@@ -833,7 +847,8 @@ def exercise(core: Path, guard: Path) -> None:
                         "Node (Dead|Slow|Fast)",
                     )
                     assert_names(dry, "Node Slow", "Node Fast")
-                    dead_row = next((row for row in dry.splitlines() if row.startswith("Node Dead ")), "")
+                    assert_names(dry, "0/3", "3/3", "MiB/s", "HTTP ms", "FAIL/TRY")
+                    dead_row = next((row for row in dry.split("NODE / RESULT")[-1].splitlines() if "Node Dead" in row), "")
                     if not dead_row.rstrip().endswith(("204 probe: HTTP 503", "204 probe: HTTP 504")):
                         raise AssertionError(f"unexpected failed-probe result row: {dead_row}")
                     after_dry = {
@@ -871,6 +886,20 @@ def exercise(core: Path, guard: Path) -> None:
                     if selection(controller_port, secret, "Other Region") != initial["Other Region"]:
                         raise AssertionError("manual non-managed group selection changed")
 
+                    downloads = STATS.count("Origin /download")
+                    ambiguous = run_guard_failure(guard, "bench", "-c", str(guard_config), "-g", "选线", "--apply")
+                    assert_names(ambiguous, "🌐 普通选线", "🧭 自动选线")
+                    if STATS.count("Origin /download") != downloads:
+                        raise AssertionError("ambiguous group consumed a measurement")
+                    select_proxy(controller_port, secret, "🌐 普通选线", "Node Slow")
+                    args = ["bench", "-c", str(guard_config), "-g", "普通", "--node", "Node Manual", "--bytes", "65536", "--apply"]
+                    assert_names(run_guard(guard, *args), "切换 🌐 普通选线", "Node Slow → Node Manual")
+                    if selection(controller_port, secret, "🌐 普通选线") != "Node Manual":
+                        raise AssertionError("unmanaged manual group did not switch")
+                    assert_names(run_guard(guard, *args), "保持 🌐 普通选线", "Node Manual")
+                    automatic = run_guard(guard, "bench", "-c", str(guard_config), "-g", "自动", "--bytes", "65536", "--apply")
+                    assert_names(automatic, "跳过 🧭 自动选线", "Node Manual")
+
                     source = run_guard(
                         guard,
                         "bench",
@@ -889,12 +918,12 @@ def exercise(core: Path, guard: Path) -> None:
                         "-c",
                         str(guard_config),
                         "--group",
-                        "Managed",
+                        "Chain",
                         "--filter",
                         "Node (Slow|Fast)",
                         "--apply",
                     )
-                    assert_names(applied, "Node Fast")
+                    assert_names(applied, "Chain", "切换 Managed", "切换 Mirror", "Node Fast")
                     final = {
                         name: selection(controller_port, secret, name) for name in initial
                     }
@@ -930,7 +959,7 @@ def exercise(core: Path, guard: Path) -> None:
                         "^(HK Slow|TW Fast)$",
                         "--apply",
                     )
-                    assert_names(selector_applied, "HK Slow", "TW Fast", "selected HK/TW")
+                    assert_names(selector_applied, "HK Slow", "TW Fast", "切换 HK/TW")
                     selector_final = {
                         name: selection(controller_port, secret, name)
                         for name in selector_before
@@ -983,7 +1012,7 @@ def exercise(core: Path, guard: Path) -> None:
                         "--node",
                         "Node Fast",
                     )
-                    assert_names(quick, "Node Fast", "1048576")
+                    assert_names(quick, "Node Fast", "1.00 MiB")
                     quick_state = json.loads(quick_history.read_text())
                     if quick_state.get("used_bytes") != 1048576:
                         raise AssertionError(
@@ -1003,7 +1032,7 @@ def exercise(core: Path, guard: Path) -> None:
                         "--streams",
                         "2",
                     )
-                    assert_names(streamed, "Node Fast", "65536")
+                    assert_names(streamed, "Node Fast", "64.0 KiB")
                     stream_state = json.loads(stream_history.read_text())
                     if stream_state.get("used_bytes") != 65536:
                         raise AssertionError(

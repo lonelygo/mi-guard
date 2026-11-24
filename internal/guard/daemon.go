@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lonelygo/mi-guard/internal/config"
+	"github.com/lonelygo/mi-guard/internal/history"
 	"github.com/lonelygo/mi-guard/internal/model"
 	"github.com/lonelygo/mi-guard/internal/policy"
 	"github.com/lonelygo/mi-guard/internal/probe"
@@ -593,13 +594,35 @@ func (d *daemonRuntime) apply(ctx context.Context, group config.Group, expected 
 	return d.runner.Apply(ctx, group, expected, ranked)
 }
 
-func (d *daemonRuntime) stableProxy(ctx context.Context, group string) (proxy model.Proxy, err error) {
-	err = withSelectorLock(ctx, "apply", func() error {
-		var readErr error
-		proxy, readErr = d.runner.Core.Proxy(ctx, group)
-		return readErr
-	})
+func (d *daemonRuntime) stableProxy(ctx context.Context, group string) (model.Proxy, error) {
+	proxy, _, err := d.runner.ObservePrimary(ctx, group)
+	if err != nil && proxy.Now != "" {
+		// The live read succeeded. Keep liveness checks running on a history I/O failure.
+		d.runner.logWarn("record selection observation failed", "group", group, "error", err)
+		return proxy, nil
+	}
 	return proxy, err
+}
+
+// ObservePrimary reads and records a stable primary while guard switches and
+// rollbacks are excluded. It also returns the live proxy if persistence fails.
+func (r *Runner) ObservePrimary(ctx context.Context, group string) (proxy model.Proxy, tenure history.SelectionTenure, err error) {
+	err = withSelectorLock(ctx, "apply", func() error {
+		p, err := r.Core.Proxy(ctx, group)
+		if err != nil {
+			return err
+		}
+		if p.Type != "Selector" {
+			return fmt.Errorf("invalid live target %s: got %s, want Selector", group, p.Type)
+		}
+		proxy = p
+		if p.Now == "" {
+			return nil
+		}
+		tenure, err = r.Store.RecordSelection(ctx, group, p.Now, time.Now().UTC(), false)
+		return err
+	})
+	return proxy, tenure, err
 }
 
 func historicCandidates(current string, candidates []string, samples []model.Sample) []model.Sample {

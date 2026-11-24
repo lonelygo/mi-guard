@@ -70,6 +70,16 @@ func TestInterruptReportsFailedRestoration(t *testing.T) {
 	}
 }
 
+func TestImplicitManagedGroupIsNeverFuzzyApplied(t *testing.T) {
+	fixture, server := newCommandController(t)
+	r := commandRunner(t, server)
+	r.Cfg.Groups[0].Name = "war" // only "warp" exists in the controller
+	err := bench(context.Background(), r, &config.CoreFile{}, benchOptions{apply: true})
+	if err == nil || !strings.Contains(err.Error(), "exact name") || len(fixture.writes) != 0 || len(fixture.delays) != 0 {
+		t.Fatalf("implicit fuzzy group: err=%v writes=%v probes=%v", err, fixture.writes, fixture.delays)
+	}
+}
+
 type commandController struct {
 	mu              sync.Mutex
 	proxies         map[string]model.Proxy

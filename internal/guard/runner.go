@@ -59,6 +59,16 @@ func physical(p model.Proxy) bool {
 // Candidates returns controller names after provider overrides. Only direct
 // physical members can be applied to a managed production selector.
 func (r *Runner) Candidates(ctx context.Context, group string) ([]string, error) {
+	return r.candidates(ctx, group, false, false)
+}
+
+// BenchCandidates expands unmanaged groups for read-only scans. Only direct
+// members may influence a manual selector's --apply ranking.
+func (r *Runner) BenchCandidates(ctx context.Context, target BenchTarget, apply bool) ([]string, error) {
+	return r.candidates(ctx, target.Group.Name, true, apply)
+}
+
+func (r *Runner) candidates(ctx context.Context, group string, benchScan, apply bool) ([]string, error) {
 	all, err := r.Core.Inventory(ctx)
 	if err != nil {
 		return nil, err
@@ -71,16 +81,21 @@ func (r *Runner) Candidates(ctx context.Context, group string) ([]string, error)
 	if target.All == nil {
 		return nil, fmt.Errorf("proxy %s has no candidates", model.QuoteName(group))
 	}
-	if managed && target.Type != "Selector" {
+	if !benchScan && managed && target.Type != "Selector" {
 		return nil, fmt.Errorf("%s is %s, want Selector", model.QuoteName(group), target.Type)
 	}
-	bench, ok := all[r.Cfg.Mihomo.TestGroup]
+	benchName := r.Cfg.Mihomo.TestGroup
+	bench, ok := all[benchName]
 	if !ok || bench.Type != "Selector" {
-		return nil, fmt.Errorf("load the dedicated Mihomo selector %s first", model.QuoteName(r.Cfg.Mihomo.TestGroup))
+		return nil, fmt.Errorf("load the dedicated Mihomo selector %s first", model.QuoteName(benchName))
 	}
 	for name, p := range all {
-		if p.Dialer == bench.Name || (name != "GLOBAL" && name != bench.Name && slices.Contains(p.All, bench.Name)) {
-			return nil, fmt.Errorf("live %s consumes dedicated bench selector %s", model.QuoteName(name), model.QuoteName(bench.Name))
+		usesBench := slices.Contains(p.All, benchName)
+		if name == "GLOBAL" {
+			usesBench = p.Now == benchName
+		}
+		if p.Dialer == benchName || name != benchName && usesBench {
+			return nil, fmt.Errorf("live %s consumes dedicated bench selector %s", model.QuoteName(name), model.QuoteName(benchName))
 		}
 	}
 	allowed := make(map[string]bool, len(bench.All))
@@ -91,7 +106,10 @@ func (r *Runner) Candidates(ctx context.Context, group string) ([]string, error)
 	if managed && g.Exclude != "" {
 		exclude = regexp.MustCompile(g.Exclude)
 	}
-	seen := map[string]bool{group: true}
+	// GLOBAL can list the dedicated selector even when no production route
+	// uses it. Its private member list is not part of a production scan.
+	seen := map[string]bool{group: true, benchName: true}
+	directOnly := target.Type == "Selector" && (managed || apply)
 	var names []string
 	var visit func(string)
 	visit = func(name string) {
@@ -107,17 +125,30 @@ func (r *Runner) Candidates(ctx context.Context, group string) ([]string, error)
 			if allowed[name] && (exclude == nil || !exclude.MatchString(name)) {
 				names = append(names, name)
 			}
-		} else if !managed {
+		} else if !directOnly {
 			for _, member := range p.All {
 				visit(member)
 			}
 		}
 	}
+	var nested []string
 	for _, member := range target.All {
+		if directOnly && all[member].All != nil {
+			nested = append(nested, member)
+			continue
+		}
 		visit(member)
 	}
+	if len(names) == 0 && benchScan && apply {
+		// A group containing only other groups can still be benchmarked. The
+		// apply step reports that its measured leaves aren't direct choices.
+		directOnly = false
+		for _, member := range nested {
+			visit(member)
+		}
+	}
 	if len(names) == 0 {
-		return nil, fmt.Errorf("no eligible physical members of %s in %s", model.QuoteName(group), model.QuoteName(bench.Name))
+		return nil, fmt.Errorf("no eligible physical members of %s in %s", model.QuoteName(group), model.QuoteName(benchName))
 	}
 	return names, nil
 }
@@ -180,7 +211,7 @@ func (r *Runner) Measure(ctx context.Context, node, kind string, limit int64) (s
 		if res.Bytes < limit {
 			return fmt.Errorf("%w: need %d bytes, %d available", history.ErrBudget, limit, res.Bytes)
 		}
-		s = model.Sample{At: time.Now().UTC(), Scope: "front", Kind: kind, Node: node, Provider: p.Provider, Attempts: 1}
+		s = model.Sample{At: time.Now().UTC(), Scope: "front", Kind: kind, Node: node, ProxyType: p.Type, Provider: p.Provider, Attempts: 1}
 		if p.Dialer != "" {
 			s.Scope = "chain:" + node
 		}
@@ -222,16 +253,37 @@ func (r *Runner) Measure(ctx context.Context, node, kind string, limit int64) (s
 }
 
 func (r *Runner) Scan(ctx context.Context, nodes []string, kind string, limit int64) ([]model.Sample, error) {
-	out := make([]model.Sample, 0, len(nodes))
-	seen := map[string]bool{}
+	return r.ScanWithProgress(ctx, nodes, kind, limit, nil)
+}
+
+// ScanProgress is emitted before each measurement and after its result is settled.
+// A nil result identifies the node about to be measured.
+type ScanProgress struct {
+	Node             string
+	Completed, Total int
+	Result           *model.Sample
+}
+
+func (r *Runner) ScanWithProgress(ctx context.Context, nodes []string, kind string, limit int64, report func(ScanProgress)) ([]model.Sample, error) {
+	unique := make([]string, 0, len(nodes))
+	seen := make(map[string]bool, len(nodes))
 	for _, n := range nodes {
-		if seen[n] {
-			continue
+		if !seen[n] {
+			seen[n] = true
+			unique = append(unique, n)
 		}
-		seen[n] = true
+	}
+	out := make([]model.Sample, 0, len(unique))
+	for i, n := range unique {
+		if report != nil {
+			report(ScanProgress{Node: n, Completed: i, Total: len(unique)})
+		}
 		s, err := r.Measure(ctx, n, kind, limit)
 		if s.Node != "" {
 			out = append(out, s)
+			if report != nil {
+				report(ScanProgress{Node: n, Completed: i + 1, Total: len(unique), Result: &s})
+			}
 		}
 		if err != nil {
 			return out, err
