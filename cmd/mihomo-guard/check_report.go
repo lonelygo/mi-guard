@@ -102,7 +102,11 @@ func reportLiveGroup(out io.Writer, group config.Group, current string, nodes []
 		if age > maxAge {
 			freshness = "前，已过期"
 		}
-		bandwidth = fmt.Sprintf("%.2f Mbps / %.2f MiB/s（%s，%s%s）", sample.Mbps, mibPerSecond(sample.Mbps), sample.Kind, durationLabel(age), freshness)
+		streams := "旧记录，流数未知"
+		if sample.Profile.Known() {
+			streams = fmt.Sprintf("%d 流", sample.Profile.Streams)
+		}
+		bandwidth = fmt.Sprintf("%.2f Mbps / %.2f MiB/s（%s，%s，%s%s）", sample.Mbps, mibPerSecond(sample.Mbps), sample.Kind, streams, durationLabel(age), freshness)
 	}
 	longestNode, longest := "", time.Duration(0)
 	for node, span := range tenure.Longest {

@@ -14,6 +14,7 @@ import http.client
 import http.server
 import json
 import os
+import re
 import select
 import signal
 import socket
@@ -47,10 +48,14 @@ class Stats:
 
 
 STATS = Stats()
+SMOKE_SWEEP_BYTES = 256 * 1024
+DEFAULT_STREAM_BYTES = 4 * 1024 * 1024
+DEFAULT_NODE_BYTES = 4 * DEFAULT_STREAM_BYTES
 
 
 class QuietThreadingHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
+    download_barrier: threading.Barrier | None = None
 
     def handle_error(self, _request: Any, _client_address: Any) -> None:
         return
@@ -58,6 +63,7 @@ class QuietThreadingHTTPServer(http.server.ThreadingHTTPServer):
 
 class ProbeHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    server: QuietThreadingHTTPServer
 
     def do_HEAD(self) -> None:
         self._respond(body=False)
@@ -78,6 +84,10 @@ class ProbeHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/trace":
             payload = b"ip=203.0.113.9\ncolo=LAX\nloc=US\n"
         elif path == "/download":
+            if body:
+                STATS.hit(f"Download {self.headers.get('Range', '')}")
+                if (barrier := self.server.download_barrier) is not None:
+                    barrier.wait()
             # Deliberately ignore Range. The guard must stop at its own cap.
             length = 8 * 1024 * 1024
             self.send_response(http.HTTPStatus.OK)
@@ -333,6 +343,29 @@ def run_guard_failure(guard: Path, *arguments: str) -> str:
     return completed.stdout
 
 
+def start_daemon(guard: Path, config: Path) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [str(guard), "daemon", "-c", str(config)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=guard_environment(),
+        text=True,
+    )
+
+
+def stop_daemon(process: subprocess.Popen[str]) -> str:
+    process.send_signal(signal.SIGINT)
+    try:
+        output, _ = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        output, _ = process.communicate(timeout=2)
+        raise AssertionError(f"daemon did not stop after SIGINT:\n{output}")
+    if process.returncode != 0:
+        raise AssertionError(f"daemon SIGINT exit {process.returncode}:\n{output}")
+    return output
+
+
 def run_recovery_daemon(
     guard: Path,
     config: Path,
@@ -344,13 +377,7 @@ def run_recovery_daemon(
     stable_groups: dict[str, str] | None = None,
 ) -> str:
     stable_groups = stable_groups or {}
-    process = subprocess.Popen(
-        [str(guard), "daemon", "-c", str(config)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=guard_environment(),
-        text=True,
-    )
+    process = start_daemon(guard, config)
     deadline = time.monotonic() + 6
     recovered = ""
     while time.monotonic() < deadline:
@@ -385,15 +412,7 @@ def run_recovery_daemon(
         raise AssertionError(
             f"daemon did not recover unreachable selector {target_group!r}:\n{output}"
         )
-    process.send_signal(signal.SIGINT)
-    try:
-        output, _ = process.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        output, _ = process.communicate(timeout=2)
-        raise AssertionError(f"recovery daemon did not stop after SIGINT:\n{output}")
-    if process.returncode != 0:
-        raise AssertionError(f"recovery daemon SIGINT exit {process.returncode}:\n{output}")
+    stop_daemon(process)
     return recovered
 
 
@@ -574,8 +593,16 @@ def write_guard_config(
     secret: str,
     origin_port: int,
     history: Path,
+    *,
+    bench_bytes_per_stream: int | None = SMOKE_SWEEP_BYTES,
+    monthly_bytes: int = 134217728,
+    heartbeat_interval: str = "30s",
 ) -> None:
     origin = f"http://127.0.0.1:{origin_port}"
+    # Omitting the new keys reproduces the YAML written by older installations.
+    bench_settings = "streams_per_node: 1" if bench_bytes_per_stream is None else (
+        f"bench_streams: 1\n  bench_bytes_per_stream: {bench_bytes_per_stream}"
+    )
     path.write_text(
         f"""mihomo:
   controller: http://127.0.0.1:{controller_port}
@@ -585,7 +612,7 @@ def write_guard_config(
   test_group: mi-guard-bench
   test_proxy: http://127.0.0.1:{listener_port}
 schedule:
-  heartbeat_interval: 30s
+  heartbeat_interval: {heartbeat_interval}
   heartbeat_timeout: 1s
   heartbeat_failures: 2
   full_interval: 12h
@@ -599,10 +626,11 @@ speedtest:
   geo_url: {origin}/geo
   trace_url: {origin}/trace
   timeout: 2s
-  sweep_bytes: 4194304
+  {bench_settings}
+  sweep_bytes: {SMOKE_SWEEP_BYTES}
   quick_bytes: 16384
   confirm_bytes: 65536
-  monthly_bytes: 134217728
+  monthly_bytes: {monthly_bytes}
   billing_day: 1
 selection:
   severe_drop_pct: 20
@@ -634,6 +662,72 @@ def assert_names(output: str, *names: str) -> None:
     missing = [name for name in names if name not in output]
     if missing:
         raise AssertionError(f"command output missing {missing}:\n{output}")
+
+
+def assert_downloads(before: dict[str, int], streams: int, per_stream: int) -> None:
+    for key in ("Origin /download", f"Download bytes=0-{per_stream - 1}"):
+        count = STATS.count(key) - before.get(key, 0)
+        if count != streams:
+            raise AssertionError(f"{key}: got {count} requests, expected {streams}")
+
+
+def assert_download_sample(sample: dict[str, Any], kind: str, streams: int, total: int) -> None:
+    scope = rf"download/v1/{streams}/{total}/[0-9a-fA-F]{{64}}/front"
+    if (
+        sample.get("kind") != kind
+        or not re.fullmatch(scope, sample.get("scope", ""))
+        or "profile" in sample
+        or sample.get("bytes") != total
+        or sample.get("error")
+    ):
+        raise AssertionError(f"expected successful {kind} with {streams} streams and {total} bytes: {sample}")
+
+
+def check_bench_profile(
+    guard: Path, config: Path, history: Path, streams: int, per_stream: int,
+    display_bytes: str, *flags: str, previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    previous = previous or {}
+    before = STATS.snapshot()
+    output = run_guard(guard, "bench", "-c", str(config), "--node", "Node Fast", *flags)
+    assert_names(output, "Node Fast", display_bytes)
+    assert_downloads(before, streams, per_stream)
+    total = streams * per_stream
+    state = json.loads(history.read_text())
+    samples = state.get("samples", [])
+    if (
+        state.get("version") != 1
+        or state.get("reservations")
+        or state.get("used_bytes") != previous.get("used_bytes", 0) + total
+        or len(samples) != len(previous.get("samples", [])) + 1
+        or samples[-1].get("node") != "Node Fast"
+    ):
+        raise AssertionError(f"expected one settled {total}-byte Node Fast sample: {state}")
+    assert_download_sample(samples[-1], "bench", streams, total)
+    return state
+
+
+def check_daemon_sweep(guard: Path, config: Path, history: Path) -> str:
+    # The remaining budget admits one full sweep measurement.
+    before = STATS.snapshot()
+    used = json.loads(history.read_text())["used_bytes"]
+    process = start_daemon(guard, config)
+    try:
+        deadline = time.monotonic() + 6
+        while process.poll() is None and time.monotonic() < deadline:
+            samples = json.loads(history.read_text())["samples"]
+            if any(s["kind"] == "sweep" and s["bytes"] > 0 for s in samples):
+                break
+            time.sleep(0.04)
+    finally:
+        output = stop_daemon(process)
+    state = json.loads(history.read_text())
+    sweeps = [s for s in state["samples"] if s["kind"] == "sweep" and s["bytes"] > 0]
+    if len(sweeps) != 1 or state["used_bytes"] != used + SMOKE_SWEEP_BYTES or state.get("reservations"):
+        raise AssertionError(f"expected one settled daemon sweep: {state}\n{output}")
+    assert_downloads(before, 1, SMOKE_SWEEP_BYTES)
+    assert_download_sample(sweeps[0], "sweep", 1, SMOKE_SWEEP_BYTES)
+    return sweeps[0]["scope"]
 
 
 def exercise(core: Path, guard: Path) -> None:
@@ -722,6 +816,7 @@ def exercise(core: Path, guard: Path) -> None:
                 secret,
                 origin.server_address[1],
                 cancel_history,
+                bench_bytes_per_stream=4194304,
             )
             quick_guard_config = scratch / "quick-mihomo-guard.yaml"
             quick_history = scratch / "quick-history.json"
@@ -734,11 +829,7 @@ def exercise(core: Path, guard: Path) -> None:
                 secret,
                 origin.server_address[1],
                 quick_history,
-            )
-            quick_guard_config.write_text(
-                quick_guard_config.read_text().replace(
-                    "sweep_bytes: 4194304", "sweep_bytes: 1048576"
-                )
+                bench_bytes_per_stream=1048576,
             )
             stream_guard_config = scratch / "stream-mihomo-guard.yaml"
             stream_history = scratch / "stream-history.json"
@@ -752,6 +843,18 @@ def exercise(core: Path, guard: Path) -> None:
                 origin.server_address[1],
                 stream_history,
             )
+            default_config = scratch / "legacy-defaults.yaml"
+            short_config = scratch / "legacy-defaults-short-budget.yaml"
+            default_history = scratch / "default-history.json"
+            for path, budget in (
+                (default_config, DEFAULT_NODE_BYTES + SMOKE_SWEEP_BYTES),
+                (short_config, 2 * DEFAULT_NODE_BYTES - 1),
+            ):
+                write_guard_config(
+                    path, core, core_config, controller_port, listener_port, secret,
+                    origin.server_address[1], default_history,
+                    bench_bytes_per_stream=None, monthly_bytes=budget,
+                )
             provider.write_text(
                 json.dumps(
                     {
@@ -1004,42 +1107,48 @@ def exercise(core: Path, guard: Path) -> None:
                     }.issubset(measured):
                         raise AssertionError(f"history missing measured nodes: {measured}")
 
-                    quick = run_guard(
-                        guard,
-                        "bench",
-                        "-c",
-                        str(quick_guard_config),
-                        "--node",
-                        "Node Fast",
+                    quick_state = check_bench_profile(
+                        guard, quick_guard_config, quick_history, 1, 1048576, "1.00 MiB",
                     )
-                    assert_names(quick, "Node Fast", "1.00 MiB")
-                    quick_state = json.loads(quick_history.read_text())
-                    if quick_state.get("used_bytes") != 1048576:
-                        raise AssertionError(
-                            f"1 MiB quick measurement was not strictly accounted: {quick_state}"
-                        )
 
-                    stream_downloads = STATS.count("Origin /download")
-                    streamed = run_guard(
-                        guard,
-                        "bench",
-                        "-c",
-                        str(stream_guard_config),
-                        "--node",
-                        "Node Fast",
-                        "--bytes",
-                        "65536",
-                        "--streams",
-                        "2",
+                    stream_state = check_bench_profile(
+                        guard, stream_guard_config, stream_history, 2, 32768, "64.0 KiB",
+                        "--streams", "2", "--bytes", "65536",
                     )
-                    assert_names(streamed, "Node Fast", "64.0 KiB")
-                    stream_state = json.loads(stream_history.read_text())
-                    if stream_state.get("used_bytes") != 65536:
-                        raise AssertionError(
-                            f"two streams did not share one 64 KiB grant: {stream_state}"
+                    check_bench_profile(
+                        guard, stream_guard_config, stream_history, 2, 65536, "128.0 KiB",
+                        "--streams", "2", "--bytes-per-stream", "65536", previous=stream_state,
+                    )
+
+                    # Hold the first response until all four requests reach the loopback origin.
+                    origin.download_barrier = threading.Barrier(4, timeout=5)
+                    try:
+                        default_state = check_bench_profile(
+                            guard, default_config, default_history, 4, DEFAULT_STREAM_BYTES, "16.00 MiB",
                         )
-                    if STATS.count("Origin /download") != stream_downloads + 2:
-                        raise AssertionError("two-stream bench did not issue exactly two downloads")
+                    finally:
+                        origin.download_barrier = None
+
+                    # This ledger has room for all but the last byte of another default bench.
+                    before = STATS.snapshot()
+                    short_args = ("bench", "-c", str(short_config), "--node", "Node Fast")
+                    conflict = run_guard_failure(
+                        guard, *short_args, "--bytes", "65536", "--bytes-per-stream", "65536"
+                    )
+                    assert_names(conflict, "--bytes", "--bytes-per-stream")
+                    short = run_guard_failure(guard, *short_args)
+                    assert_names(short.lower(), "budget")
+                    for key in ("Node Fast", "Origin /204", "Origin /download"):
+                        if STATS.count(key) != before.get(key, 0):
+                            raise AssertionError(f"rejected bench sent traffic to {key}")
+                    rejected = json.loads(default_history.read_text())
+                    if (
+                        rejected["used_bytes"] != DEFAULT_NODE_BYTES or rejected.get("reservations")
+                        or rejected["samples"] != default_state["samples"]
+                    ):
+                        raise AssertionError(f"rejected bench changed the measurement ledger: {rejected}")
+
+                    sweep_scope = check_daemon_sweep(guard, default_config, default_history)
 
                     interrupt_active_bench(guard, cancel_guard_config)
                     cancelled = json.loads(cancel_history.read_text())
@@ -1057,8 +1166,17 @@ def exercise(core: Path, guard: Path) -> None:
 
                     recovery_history = scratch / "recovery-history.json"
                     recovery_state = json.loads(history.read_text())
-                    for sample in recovery_state.get("samples", []):
-                        sample["kind"] = "sweep"
+                    # Seed only measurements taken with the real daemon's single-stream profile.
+                    recovery_state["samples"] = [
+                        dict(sample, kind="sweep") for sample in recovery_state["samples"]
+                        if sample["kind"] == "bench" and sample["scope"] == sweep_scope
+                    ]
+                    seeded = {
+                        s["node"] for s in recovery_state["samples"]
+                        if s["bytes"] > 0 and not s.get("error")
+                    }
+                    if not {"Node Slow", "Node Fast", "HK Slow", "TW Fast"}.issubset(seeded):
+                        raise AssertionError(f"missing comparable samples for daemon recovery: {seeded}")
                     recovery_history.write_text(json.dumps(recovery_state))
                     recovery_config = scratch / "recovery-mihomo-guard.yaml"
                     write_guard_config(
@@ -1070,15 +1188,8 @@ def exercise(core: Path, guard: Path) -> None:
                         secret,
                         origin.server_address[1],
                         recovery_history,
-                    )
-                    recovery_config.write_text(
-                        recovery_config.read_text()
-                        .replace("heartbeat_interval: 30s", "heartbeat_interval: 100ms")
-                        .replace("heartbeat_timeout: 1s", "heartbeat_timeout: 200ms")
-                        .replace(
-                            "monthly_bytes: 134217728",
-                            f"monthly_bytes: {recovery_state['used_bytes']}",
-                        )
+                        monthly_bytes=recovery_state["used_bytes"],
+                        heartbeat_interval="100ms",
                     )
 
                     select_proxy(controller_port, secret, "HK/TW", "HK Dead")
@@ -1151,6 +1262,7 @@ def exercise(core: Path, guard: Path) -> None:
                                 "cancelled_bytes": cancelled_bytes,
                                 "quick_bytes": quick_state["used_bytes"],
                                 "stream_bytes": stream_state["used_bytes"],
+                                "default_bench_bytes": default_state["used_bytes"],
                                 "recovered": recovered,
                                 "selector_recovered": selector_recovered,
                                 "sample_count": len(samples),

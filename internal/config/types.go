@@ -38,17 +38,19 @@ type Schedule struct {
 	GeoInterval       time.Duration `yaml:"geo_interval"`
 }
 type Speed struct {
-	Streams      int           `yaml:"streams_per_node"`
-	URL          string        `yaml:"url"`
-	LivenessURL  string        `yaml:"liveness_url"`
-	GeoURL       string        `yaml:"geo_url"`
-	TraceURL     string        `yaml:"trace_url"`
-	Timeout      time.Duration `yaml:"timeout"`
-	SweepBytes   int64         `yaml:"sweep_bytes"`
-	QuickBytes   int64         `yaml:"quick_bytes"`
-	ConfirmBytes int64         `yaml:"confirm_bytes"`
-	MonthlyBytes int64         `yaml:"monthly_bytes"`
-	BillingDay   int           `yaml:"billing_day"`
+	LegacyStreams       *int          `yaml:"streams_per_node,omitempty"`
+	BenchStreams        int           `yaml:"bench_streams"`
+	BenchBytesPerStream int64         `yaml:"bench_bytes_per_stream"`
+	URL                 string        `yaml:"url"`
+	LivenessURL         string        `yaml:"liveness_url"`
+	GeoURL              string        `yaml:"geo_url"`
+	TraceURL            string        `yaml:"trace_url"`
+	Timeout             time.Duration `yaml:"timeout"`
+	SweepBytes          int64         `yaml:"sweep_bytes"`
+	QuickBytes          int64         `yaml:"quick_bytes"`
+	ConfirmBytes        int64         `yaml:"confirm_bytes"`
+	MonthlyBytes        int64         `yaml:"monthly_bytes"`
+	BillingDay          int           `yaml:"billing_day"`
 }
 type Selection struct {
 	SevereDropPct     float64           `yaml:"severe_drop_pct"`

@@ -6,12 +6,56 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lonelygo/mi-guard/internal/model"
 )
+
+func TestDownloadProfilesSurviveLedgerRewritesAlongsideLegacySamples(t *testing.T) {
+	ctx := context.Background()
+	store := testStore(t, 4)
+	old := measurement("a", 12, 128)
+	if err := store.Record(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	sample := measurement("a", 29, 192)
+	sample.Kind, sample.Scope = "bench", "chain:a/path"
+	sample.Profile = model.DownloadProfile{Streams: 4, TotalBytes: 512, Target: strings.Repeat("ab", 32)}
+	res, err := store.Reserve(ctx, 512, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Finish(ctx, res, sample); err != nil {
+		t.Fatal(err)
+	}
+	// The strict v1 reader sees two ordinary sample records and preserves their
+	// scope strings through a read/write cycle.
+	raw, _, err := store.load()
+	if err != nil || len(raw.Samples) != 2 {
+		t.Fatalf("v1 ledger: %+v, %v", raw, err)
+	}
+	if raw.Samples[0].Scope != old.Scope || raw.Samples[1].Scope != downloadScopePrefix+"4/512/"+sample.Profile.Target+"/"+sample.Scope {
+		t.Fatalf("stored scopes = %q, %q", raw.Samples[0].Scope, raw.Samples[1].Scope)
+	}
+	if err := store.write(raw); err != nil {
+		t.Fatal(err)
+	}
+	view, err := store.Snapshot(ctx)
+	if err != nil || view.PendingBytes != 0 || view.UsedBytes != sample.Bytes || len(view.Samples) != 2 {
+		t.Fatalf("snapshot = %+v, %v", view, err)
+	}
+	if legacy, measured := view.Samples[0], view.Samples[1]; legacy.Profile.Known() || legacy.Scope != "front" || measured.Profile != sample.Profile || measured.Scope != sample.Scope {
+		t.Fatalf("decoded measurements = %+v", view.Samples)
+	}
+	for _, scope := range []string{"front", "download/v1/4/16/bad/front", "download/v1/9/512/" + sample.Profile.Target + "/front"} {
+		if route, profile := readDownloadScope(scope); profile.Known() || route != scope {
+			t.Errorf("unlabelled scope %q decoded as %q, %+v", scope, route, profile)
+		}
+	}
+}
 
 func TestReserveFinishAndIdempotence(t *testing.T) {
 	store := testStore(t, 2)

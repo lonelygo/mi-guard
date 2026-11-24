@@ -1,7 +1,9 @@
 package policy
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,7 +21,7 @@ func TestBaselineUsesHealthyComparableHistory(t *testing.T) {
 		withScope(sample("node", 999, 10, 0), "chain"),
 		sample("other", 999, 10, 0),
 	}
-	if got := Baseline("node", "provider", samples); got != 85 {
+	if got := Baseline(withKind(sample("node", 20, 1, 0), "quick"), samples); got != 85 {
 		t.Fatalf("Baseline = %v, want 85", got)
 	}
 }
@@ -64,6 +66,11 @@ func TestRankUsesHistoricalLowAndThenStickyTie(t *testing.T) {
 		sample("volatile", 20, 10, 0), sample("volatile", 30, 10, 0), sample("volatile", 100, 10, 0),
 		sample("steady", 80, 10, 0), sample("steady", 82, 10, 0), sample("steady", 86, 10, 0),
 	}
+	// These are previous probes, including the one that happened to measure
+	// the same speed as the fresh volatile result.
+	for i := range past {
+		past[i].At = time.Unix(0, int64(i))
+	}
 	assertNodes(t, Rank("volatile", fresh, past, 20), "steady", "volatile")
 
 	closePast := []model.Sample{
@@ -89,14 +96,116 @@ func TestRankAggregatesHistoricalProbeReliability(t *testing.T) {
 	assertNodes(t, Rank("fast", []model.Sample{fast, steady}, past, 20), "steady", "fast")
 }
 
-func TestAggregateReliabilityDoesNotDoubleCountFreshSample(t *testing.T) {
+func TestBenchRankUsesOnlyExactProfileHistory(t *testing.T) {
+	for _, mode := range []struct{ streams, other int }{{1, 4}, {4, 1}} {
+		t.Run(fmt.Sprintf("%d-stream", mode.streams), func(t *testing.T) {
+			current := withKind(sample("current", 90, 2, 0), "bench")
+			current.Profile.Streams = mode.streams
+			peer := current
+			peer.Node, peer.Mbps = "peer", 100
+			fresh := []model.Sample{current, peer}
+
+			// Two samples are insufficient for a quartile. A third comparable
+			// bandwidth or a failed probe of the current node breaks the sticky tie.
+			var bandwidth []model.Sample
+			for i := 0; i < 3; i++ {
+				old := peer
+				old.At, old.Mbps, old.Attempts = time.Unix(int64(i), 0), 1000, 0
+				bandwidth = append(bandwidth, old)
+			}
+			failure := withError(current)
+			failure.Mbps, failure.Attempts, failure.Failures = 0, 10, 10
+			assertNodes(t, Rank("current", fresh, bandwidth[:2], 20), "current", "peer")
+			assertNodes(t, Rank("current", fresh, bandwidth, 20), "peer", "current")
+			assertNodes(t, Rank("current", fresh, []model.Sample{failure}, 20), "peer", "current")
+			both := append([]model.Sample(nil), bandwidth...)
+			for _, old := range bandwidth {
+				old.Node, old.Mbps = current.Node, 50
+				both = append(both, old)
+			}
+			assertNodes(t, Rank("current", fresh, both, 20), "peer", "current")
+
+			for _, tc := range []struct {
+				name   string
+				change func(*model.Sample)
+			}{
+				{"opposite stream count", func(s *model.Sample) { s.Profile.Streams = mode.other }},
+				{"different requested bytes", func(s *model.Sample) { s.Profile.TotalBytes++ }},
+				{"different target", func(s *model.Sample) { s.Profile.Target = strings.Repeat("b", 64) }},
+				{"legacy", func(s *model.Sample) { s.Profile = model.DownloadProfile{} }},
+				{"daemon", func(s *model.Sample) { s.Kind = "sweep" }},
+				{"different provider", func(s *model.Sample) { s.Provider = "former" }},
+				{"different route", func(s *model.Sample) { s.Scope = "chain:" + s.Node }},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					past := append([]model.Sample{failure}, bandwidth...)
+					for i := range past {
+						tc.change(&past[i])
+					}
+					assertNodes(t, Rank("current", fresh, past, 20), "current", "peer")
+				})
+			}
+		})
+	}
+}
+
+func TestUnknownBenchProfileUsesFreshEvidenceAlone(t *testing.T) {
+	current := withKind(sample("current", 100, 2, 1), "bench")
+	current.Profile = model.DownloadProfile{}
+	peer := current
+	peer.Node, peer.Mbps, peer.Failures = "peer", 90, 0
+	old := withError(peer)
+	old.Mbps, old.Attempts, old.Failures = 0, 100, 100
+	assertNodes(t, Rank("current", []model.Sample{current, peer}, []model.Sample{old}, 20), "peer", "current")
+}
+
+func TestChainBenchUsesItsOwnHistoryAndFreshProbes(t *testing.T) {
+	current := withScope(withKind(sample("current", 95, 2, 0), "bench"), "chain:current")
+	peer := withScope(withKind(sample("peer", 100, 2, 0), "bench"), "chain:peer")
+	fresh := []model.Sample{current, peer}
+	failure := withError(peer)
+	failure.Mbps, failure.Failures = 0, 2
+	assertNodes(t, Rank("peer", fresh, []model.Sample{withScope(failure, "front")}, 20), "peer", "current")
+	assertNodes(t, Rank("peer", fresh, []model.Sample{failure}, 20), "current", "peer")
+	fresh[1].Failures = 1
+	assertNodes(t, Rank("peer", fresh, nil, 20), "current", "peer")
+}
+
+func TestDaemonStatsShareProbeSizesAndExcludeOtherProfiles(t *testing.T) {
+	quick := withKind(sample("node", 75, 2, 0), "quick")
+	quick.Profile.TotalBytes = 256
+	sweep := sample("node", 80, 2, 0)
+	confirm := withKind(sample("node", 100, 2, 0), "confirm")
+	confirm.Profile.TotalBytes = 1024
+	failure := withError(quick)
+	failure.Mbps, failure.Failures = 0, 2
+
+	high := sample("node", 3000, 10, 5)
+	multi, legacy, partial, target := high, high, high, high
+	multi.Profile.Streams = 4
+	legacy.Profile = model.DownloadProfile{}
+	partial.Profile.TotalBytes = 0
+	target.Profile.Target = strings.Repeat("b", 64)
+	past := []model.Sample{sweep, confirm, failure, withKind(high, "bench"), multi, legacy, partial, target}
+	stats := statsFor(quick, past)
+	if stats.attempts != 8 || stats.failures != 2 || len(stats.bandwidth) != 2 {
+		t.Fatalf("daemon stats = %+v", stats)
+	}
+	if got := Baseline(quick, past); got != 90 {
+		t.Fatalf("quick baseline = %v, want 90", got)
+	}
+}
+
+func TestDuplicateObservationsIncludeTheirDownloadProfile(t *testing.T) {
 	fresh := sample("node", 100, 7, 2)
 	fresh.At = time.Date(2026, time.November, 20, 12, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 	persisted := fresh
 	persisted.At = fresh.At.UTC()
-	got := aggregateReliability(fresh, []model.Sample{persisted, persisted})
-	if got.attempts != 7 || got.failures != 2 {
-		t.Fatalf("aggregate = %+v", got)
+	otherSize := persisted
+	otherSize.Profile.TotalBytes++
+	got := statsFor(fresh, []model.Sample{persisted, persisted, otherSize})
+	if got.attempts != 14 || got.failures != 4 || len(got.bandwidth) != 2 {
+		t.Fatalf("distinct observations = %+v", got)
 	}
 }
 
@@ -151,6 +260,7 @@ func sample(node string, mbps float64, attempts, failures int) model.Sample {
 		Provider:  "provider",
 		Scope:     "front",
 		Kind:      "sweep",
+		Profile:   model.DownloadProfile{Streams: 1, TotalBytes: 4096, Target: strings.Repeat("a", 64)},
 		Mbps:      mbps,
 		Attempts:  attempts,
 		Failures:  failures,

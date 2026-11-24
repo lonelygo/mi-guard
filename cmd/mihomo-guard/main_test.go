@@ -33,7 +33,7 @@ func TestHelpAndVersionWithoutConfiguration(t *testing.T) {
 		{[]string{"-h"}, []string{"-h, --help", "-v, --version"}},
 		{[]string{"--help"}, []string{"-h, --help", "-v, --version"}},
 		{[]string{"bench", "-h"}, []string{"mihomo-guard bench", "-apply"}},
-		{[]string{"bench", "--help"}, []string{"mihomo-guard bench", "-apply"}},
+		{[]string{"bench", "--help"}, []string{"mihomo-guard bench", "-apply", "-bytes-per-stream", "shared across streams"}},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			out, err := os.CreateTemp(t.TempDir(), "stdout")
@@ -57,6 +57,28 @@ func TestHelpAndVersionWithoutConfiguration(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestBenchRejectsConflictingAndInvalidCapsBeforeStartingCore(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "guard.yaml")
+	if err := config.WriteExample(path); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--bytes", "64", "--bytes-per-stream", "64"}, "either --bytes"},
+		{[]string{"--streams", "4", "--bytes", "3"}, "one byte per stream"},
+		{[]string{"--streams", "0"}, "--streams"},
+		{[]string{"--bytes-per-stream", "0"}, "positive"},
+		{[]string{"--streams", "8", "--bytes-per-stream", "9223372036854775807"}, "total"},
+	} {
+		args := append([]string{"bench", "-c", path, "--source", "missing.yaml"}, tc.args...)
+		if err := run(context.Background(), args); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%v: got %v, want %q", tc.args, err, tc.want)
+		}
 	}
 }
 

@@ -149,7 +149,9 @@ func (d *daemonRuntime) recoverHard(ctx context.Context, group config.Group, cur
 	if err != nil {
 		return err
 	}
-	ranked := withoutNode(historicCandidates(current, candidates, snapshot.Samples), current)
+	known, unmeasured := d.candidateHistory(ctx, candidates, snapshot.Samples, time.Time{})
+	ranked := policy.Rank(current, known, snapshot.Samples, 100)
+	ranked = withoutNode(append(ranked, unmeasured...), current)
 	for index := range ranked {
 		ranked[index].Kind = "recovery"
 	}
@@ -330,7 +332,7 @@ func (d *daemonRuntime) considerSlow(ctx context.Context, group config.Group, cu
 	if !ok {
 		return
 	}
-	baseline := policy.Baseline(current, currentSample.Provider, past)
+	baseline := policy.Baseline(currentSample, past)
 	if !bandwidthDegraded(currentSample, baseline, group.MinMbps, d.runner.Cfg.Selection.SevereDropPct) {
 		d.cancelPendingSlow(group.Name)
 		return
@@ -343,11 +345,12 @@ func (d *daemonRuntime) considerSlow(ctx context.Context, group config.Group, cu
 	go func() {
 		defer d.wg.Done()
 		defer d.clearPendingSlow(group.Name, generation)
-		d.confirmSlow(ctx, group, current, baseline, fresh, past, generation)
+		d.confirmSlow(ctx, group, currentSample, baseline, fresh, past, generation)
 	}()
 }
 
-func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, current string, baseline float64, initialFresh, past []model.Sample, generation uint64) {
+func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, initial model.Sample, baseline float64, initialFresh, past []model.Sample, generation uint64) {
+	current := initial.Node
 	required := d.runner.Cfg.Selection.SlowConfirmations
 	if required < 2 {
 		required = 2
@@ -369,7 +372,7 @@ func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, cur
 		if err != nil {
 			return
 		}
-		if !bandwidthDegraded(currentResult, baseline, group.MinMbps, d.runner.Cfg.Selection.SevereDropPct) {
+		if !policy.Comparable(initial, currentResult) || !bandwidthDegraded(currentResult, baseline, group.MinMbps, d.runner.Cfg.Selection.SevereDropPct) {
 			return
 		}
 		confirmations++
@@ -388,7 +391,10 @@ func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, cur
 	seed := initialFresh
 	sameSweep := len(seed) >= 2
 	if !sameSweep {
-		seed = cachedCandidates(candidates, past, d.runner.Cfg.Selection.MaxAge)
+		seed = nil
+		if age := d.runner.Cfg.Selection.MaxAge; age > 0 {
+			seed, _ = d.candidateHistory(ctx, candidates, past, time.Now().Add(-age))
+		}
 	}
 	shortlist := alternativeNodes(current, policy.Rank(current, seed, past, d.runner.Cfg.Selection.NearBestPct), 2)
 	shortlist = appendUnknownAlternatives(shortlist, current, candidates, 2)
@@ -625,57 +631,52 @@ func (r *Runner) ObservePrimary(ctx context.Context, group string) (proxy model.
 	return proxy, tenure, err
 }
 
-func historicCandidates(current string, candidates []string, samples []model.Sample) []model.Sample {
-	latest := make(map[string]model.Sample, len(candidates))
-	allowed := make(map[string]struct{}, len(candidates))
-	for _, candidate := range candidates {
-		allowed[candidate] = struct{}{}
-	}
-	for _, sample := range samples {
-		if _, ok := allowed[sample.Node]; !ok || sample.Mbps <= 0 || sample.Error != "" || sample.Kind == "heartbeat" || sample.Kind == "geo" {
-			continue
-		}
-		if prior, ok := latest[sample.Node]; !ok || sample.At.After(prior.At) {
-			latest[sample.Node] = sample
+func (d *daemonRuntime) candidateHistory(ctx context.Context, candidates []string, past []model.Sample, cutoff time.Time) ([]model.Sample, []model.Sample) {
+	var inventory map[string]model.Proxy
+	if len(past) > 0 {
+		// Candidate names can move between providers or become dialer-backed.
+		// If identity cannot be checked, the candidates still get live verification.
+		var err error
+		inventory, err = d.runner.Core.Inventory(ctx)
+		if err != nil {
+			d.runner.logWarn("read candidate routes for history failed", "error", err)
 		}
 	}
-	known := make([]model.Sample, 0, len(candidates))
-	unknown := make([]model.Sample, 0, len(candidates))
-	for _, candidate := range candidates {
-		if sample, ok := latest[candidate]; ok {
-			known = append(known, sample)
-		} else {
-			unknown = append(unknown, model.Sample{Node: candidate})
-		}
-	}
-	return append(policy.Rank(current, known, samples, 100), unknown...)
+	profile := d.runner.Cfg.DownloadProfile(1, d.runner.Cfg.Speed.ConfirmBytes)
+	return daemonCandidateSamples(candidates, inventory, past, profile, cutoff)
 }
 
-func cachedCandidates(candidates []string, samples []model.Sample, maxAge time.Duration) []model.Sample {
-	if maxAge <= 0 {
-		return nil
-	}
-	cutoff := time.Now().Add(-maxAge)
-	allowed := make(map[string]struct{}, len(candidates))
-	for _, candidate := range candidates {
-		allowed[candidate] = struct{}{}
+func daemonCandidateSamples(candidates []string, inventory map[string]model.Proxy, past []model.Sample, profile model.DownloadProfile, cutoff time.Time) (known, unmeasured []model.Sample) {
+	routes := make(map[string]model.Sample, len(candidates))
+	for _, node := range candidates {
+		proxy, ok := inventory[node]
+		if !ok || !physical(proxy) {
+			continue
+		}
+		scope := "front"
+		if proxy.Dialer != "" {
+			scope = "chain:" + node
+		}
+		routes[node] = model.Sample{Node: node, Provider: proxy.Provider, Scope: scope, Kind: "confirm", Profile: profile}
 	}
 	latest := make(map[string]model.Sample, len(candidates))
-	for _, sample := range samples {
-		if _, ok := allowed[sample.Node]; !ok || sample.At.Before(cutoff) || sample.Error != "" || sample.Mbps <= 0 || sample.Scope != "front" {
+	for _, sample := range past {
+		route, ok := routes[sample.Node]
+		if !ok || sample.At.Before(cutoff) || !policy.HasBandwidth(sample) || !policy.Comparable(route, sample) {
 			continue
 		}
 		if prior, ok := latest[sample.Node]; !ok || sample.At.After(prior.At) {
 			latest[sample.Node] = sample
 		}
 	}
-	result := make([]model.Sample, 0, len(latest))
-	for _, candidate := range candidates {
-		if sample, ok := latest[candidate]; ok {
-			result = append(result, sample)
+	for _, node := range candidates {
+		if sample, ok := latest[node]; ok {
+			known = append(known, sample)
+		} else {
+			unmeasured = append(unmeasured, model.Sample{Node: node})
 		}
 	}
-	return result
+	return known, unmeasured
 }
 
 func withoutNode(samples []model.Sample, node string) []model.Sample {

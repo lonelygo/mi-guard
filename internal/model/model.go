@@ -28,18 +28,33 @@ type Proxy struct {
 	Dialer   string   `json:"dialer-proxy"`
 }
 
+const MaxDownloadStreams = 8
+
+// DownloadProfile describes the requested test, even when a time limit or
+// failed probe ends it early. Its zero value identifies unlabelled history.
+type DownloadProfile struct {
+	Streams    int
+	TotalBytes int64
+	Target     string // fingerprint of download and liveness endpoints and timeouts
+}
+
+func (p DownloadProfile) Known() bool {
+	return p.Streams >= 1 && p.Streams <= MaxDownloadStreams && p.TotalBytes >= int64(p.Streams) && p.Target != ""
+}
+
 type Sample struct {
-	At        time.Time `json:"time"`
-	Node      string    `json:"node"`
-	ProxyType string    `json:"-"` // controller metadata for the live bench result
-	Provider  string    `json:"provider,omitempty"`
-	Scope     string    `json:"scope"` // front, or a chain name for a heartbeat
-	Kind      string    `json:"kind"`  // sweep, quick, confirm, bench, heartbeat
-	Mbps      float64   `json:"download_mbps"`
-	Bytes     int64     `json:"bytes"`
-	ElapsedMS int64     `json:"elapsed_ms"`
-	LatencyMS int       `json:"probe_latency_ms"`
-	Attempts  int       `json:"probe_attempts"`
-	Failures  int       `json:"probe_failures"`
-	Error     string    `json:"error,omitempty"`
+	At        time.Time       `json:"time"`
+	Node      string          `json:"node"`
+	ProxyType string          `json:"-"` // controller metadata for the live bench result
+	Profile   DownloadProfile `json:"-"` // the v1 ledger encodes this in its existing scope field
+	Provider  string          `json:"provider,omitempty"`
+	Scope     string          `json:"scope"` // front, or a chain name for a heartbeat
+	Kind      string          `json:"kind"`  // sweep, quick, confirm, bench, heartbeat
+	Mbps      float64         `json:"download_mbps"`
+	Bytes     int64           `json:"bytes"`
+	ElapsedMS int64           `json:"elapsed_ms"`
+	LatencyMS int             `json:"probe_latency_ms"`
+	Attempts  int             `json:"probe_attempts"`
+	Failures  int             `json:"probe_failures"`
+	Error     string          `json:"error,omitempty"`
 }

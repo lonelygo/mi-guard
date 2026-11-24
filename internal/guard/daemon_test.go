@@ -2,23 +2,57 @@ package guard
 
 import (
 	"context"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lonelygo/mi-guard/internal/config"
+	"github.com/lonelygo/mi-guard/internal/history"
+	"github.com/lonelygo/mi-guard/internal/mihomo"
 	"github.com/lonelygo/mi-guard/internal/model"
 	"github.com/lonelygo/mi-guard/internal/probe"
 )
 
-func TestHeartbeatHardFailureRequiresTwoChecksAndBypassesPerformanceCooldown(t *testing.T) {
+func newDaemonFixture(t *testing.T) (*controllerFixture, *Runner) {
+	t.Helper()
 	fixture, server := newControllerFixture(t)
-	fixture.failChainOnNode = "a"
 	runner := testRunner(t, fixture, server)
+	runner.Cfg.Speed.QuickBytes = 256
+	runner.Cfg.Speed.ConfirmBytes = 1024
+	runner.Cfg.Speed.SweepBytes = 4096
+	return fixture, runner
+}
+
+func daemonSample(r *Runner, node, kind string, mbps float64) model.Sample {
+	size := r.Cfg.Speed.SweepBytes
+	switch kind {
+	case "quick":
+		size = r.Cfg.Speed.QuickBytes
+	case "confirm":
+		size = r.Cfg.Speed.ConfirmBytes
+	}
+	return model.Sample{
+		At: time.Now(), Node: node, Provider: "airport", Scope: "front", Kind: kind,
+		Profile: r.Cfg.DownloadProfile(1, size), Mbps: mbps, Attempts: 1,
+	}
+}
+
+func failedDaemonSample(r *Runner, node, kind, message string) model.Sample {
+	s := daemonSample(r, node, kind, 0)
+	s.Error, s.Failures = message, 1
+	return s
+}
+
+func TestHeartbeatHardFailureRequiresTwoChecksAndBypassesPerformanceCooldown(t *testing.T) {
+	fixture, runner := newDaemonFixture(t)
+	fixture.failChainOnNode = "a"
 	runner.Cfg.Groups = []config.Group{{Name: "warp", Chain: "chain", Direct: "direct"}}
 	runtime := &daemonRuntime{runner: runner, groups: map[string]*groupRuntime{"warp": {current: "a", cooldownUntil: time.Now().Add(time.Hour)}}}
 
-	if err := runner.Store.Record(context.Background(), model.Sample{At: time.Now(), Node: "b", Provider: "airport", Scope: "front", Kind: "sweep", Mbps: 80, Attempts: 1}); err != nil {
+	if err := runner.Store.Record(context.Background(), daemonSample(runner, "c", "sweep", 80)); err != nil {
 		t.Fatal(err)
 	}
 	if err := runtime.heartbeat(context.Background(), runner.Cfg.Groups[0]); err != nil {
@@ -35,20 +69,21 @@ func TestHeartbeatHardFailureRequiresTwoChecksAndBypassesPerformanceCooldown(t *
 	}
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
-	if fixture.proxies["warp"].Now != "b" || fixture.proxies["direct"].Now != "b" {
+	if fixture.proxies["warp"].Now != "c" || fixture.proxies["direct"].Now != "c" {
 		t.Fatalf("recovery did not switch both selectors: warp=%q direct=%q", fixture.proxies["warp"].Now, fixture.proxies["direct"].Now)
 	}
 }
 
 func TestStandaloneHeartbeatProbesSelectorAndRecoversWithoutChainState(t *testing.T) {
-	fixture, server := newControllerFixture(t)
+	fixture, runner := newDaemonFixture(t)
 	fixture.failOnSelection["warp"] = "a"
-	runner := testRunner(t, fixture, server)
 	group := config.Group{Name: "warp", Mode: config.GroupModeSelector}
 	runner.Cfg.Groups = []config.Group{group}
 	runtime := &daemonRuntime{runner: runner, groups: map[string]*groupRuntime{"warp": {current: "a"}}}
 
-	if err := runner.Store.Record(context.Background(), model.Sample{At: time.Now(), Node: "b", Provider: "airport", Scope: "front", Kind: "sweep", Mbps: 80, Attempts: 1}); err != nil {
+	manual := daemonSample(runner, "c", "bench", 2000)
+	manual.Profile.Streams = 4
+	if err := runner.Store.Record(context.Background(), manual); err != nil {
 		t.Fatal(err)
 	}
 	if err := runtime.heartbeat(context.Background(), group); err != nil {
@@ -68,10 +103,8 @@ func TestStandaloneHeartbeatProbesSelectorAndRecoversWithoutChainState(t *testin
 	if connectionReads != 0 {
 		t.Fatalf("standalone daemon read connections %d times", connectionReads)
 	}
-	for _, name := range delayNames {
-		if name == "" || name == "chain" {
-			t.Fatalf("standalone daemon probed %q: %v", name, delayNames)
-		}
+	if !slices.Equal(delayNames, []string{"warp", "warp", "b", "warp"}) {
+		t.Fatalf("standalone fallback probes = %v", delayNames)
 	}
 
 	snapshot, err := runner.Store.Snapshot(context.Background())
@@ -83,19 +116,82 @@ func TestStandaloneHeartbeatProbesSelectorAndRecoversWithoutChainState(t *testin
 	}
 }
 
-func TestScheduleAndCandidateHelpers(t *testing.T) {
-	now := time.Now()
-	samples := []model.Sample{
-		{At: now.Add(-2 * time.Hour), Node: "a", Kind: "sweep", Scope: "front", Mbps: 100},
-		{At: now.Add(-time.Hour), Node: "a", Kind: "sweep", Scope: "front", Mbps: 90},
-		{At: now.Add(-3 * time.Hour), Node: "b", Kind: "sweep", Scope: "front", Mbps: 120},
+func TestDaemonCandidateHistoryMatchesLiveProviderRouteAndTarget(t *testing.T) {
+	now := time.Unix(20_000, 0)
+	nodes := []string{"a", "b", "c"}
+	live := map[string]model.Proxy{
+		"a": {Name: "a", Type: "Trojan", Provider: "airport"},
+		"b": {Name: "b", Type: "Trojan", Provider: "other", Dialer: "warp"},
+		"c": {Name: "c", Type: "Trojan", Provider: "airport"},
 	}
-	ranked := historicCandidates("a", []string{"a", "b", "c"}, samples)
-	if len(ranked) != 3 {
-		t.Fatalf("historic candidate count %d", len(ranked))
+	profile := model.DownloadProfile{Streams: 1, TotalBytes: 1024, Target: strings.Repeat("a", 64)}
+	a := model.Sample{At: now.Add(-time.Hour), Node: "a", Kind: "sweep", Scope: "front", Provider: "airport", Profile: profile, Mbps: 90}
+	a.Profile.TotalBytes = 4096
+	b := model.Sample{At: now.Add(-3 * time.Hour), Node: "b", Kind: "quick", Scope: "chain:b", Provider: "other", Profile: profile, Mbps: 80}
+	b.Profile.TotalBytes = 256
+	olderA := a
+	olderA.At, olderA.Mbps = now.Add(-2*time.Hour), 100
+	past := []model.Sample{a, b, olderA}
+
+	// Every newer speed is unsuitable, even with the same node name.
+	high := a
+	high.At, high.Mbps = now, 2000
+	bench, multi, legacy := high, high, high
+	bench.Kind = "bench"
+	multi.Profile.Streams = 4
+	legacy.Profile = model.DownloadProfile{}
+	target, former := high, high
+	target.Profile.Target = strings.Repeat("b", 64)
+	former.Provider = "former"
+	chain, front := high, high
+	chain.Scope = "chain:a"
+	front.Node, front.Provider = "b", "other"
+	past = append(past, bench, multi, legacy, target, former, chain, front)
+	bench.Node, bench.Profile.Streams = "c", 4
+	past = append(past, bench)
+
+	known, unmeasured := daemonCandidateSamples(nodes, live, past, profile, time.Time{})
+	if !slices.Equal(known, []model.Sample{a, b}) || !slices.Equal(unmeasured, []model.Sample{{Node: "c"}}) {
+		t.Fatalf("recovery history = %+v, fallback = %+v", known, unmeasured)
 	}
-	if ranked[len(ranked)-1].Node != "c" || ranked[len(ranked)-1].Mbps != 0 {
-		t.Fatalf("unknown candidate was turned into a fake observation: %#v", ranked)
+	known, unmeasured = daemonCandidateSamples(nodes, live, past, profile, a.At)
+	if !slices.Equal(known, []model.Sample{a}) || !slices.Equal(unmeasured, []model.Sample{{Node: "b"}, {Node: "c"}}) {
+		t.Fatalf("recent cache = %+v, fallback = %+v", known, unmeasured)
+	}
+	known, unmeasured = daemonCandidateSamples(nodes, nil, past, profile, time.Time{})
+	if len(known) != 0 || !slices.Equal(unmeasured, []model.Sample{{Node: "a"}, {Node: "b"}, {Node: "c"}}) {
+		t.Fatalf("unresolved live identities = %+v, fallback = %+v", known, unmeasured)
+	}
+}
+
+func TestHardRecoveryHandsOffUnmeasuredCandidatesWhenInventoryIsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	runner := &Runner{
+		Cfg:   config.Config{Speed: config.Speed{SweepBytes: 4096, ConfirmBytes: 1024}},
+		Core:  mihomo.New("unsupported://controller", ""),
+		Store: history.New(filepath.Join(t.TempDir(), "history.json"), 5, 1),
+	}
+	if err := runner.Store.Record(ctx, daemonSample(runner, "c", "sweep", 2000)); err != nil {
+		t.Fatal(err)
+	}
+	var forValidation []model.Sample
+	d := &daemonRuntime{
+		runner: runner,
+		groups: map[string]*groupRuntime{"group": {current: "a"}},
+		candidatesFn: func(context.Context, string) ([]string, error) {
+			return []string{"a", "b", "c"}, nil
+		},
+		applyFn: func(_ context.Context, _ config.Group, _ string, ranked []model.Sample) (string, error) {
+			forValidation = ranked
+			return "b", nil
+		},
+	}
+	if err := d.recoverHard(ctx, config.Group{Name: "group"}, "a"); err != nil {
+		t.Fatal(err)
+	}
+	want := []model.Sample{{Node: "b", Kind: "recovery"}, {Node: "c", Kind: "recovery"}}
+	if !slices.Equal(forValidation, want) {
+		t.Fatalf("candidates for live validation = %+v, want %+v", forValidation, want)
 	}
 }
 
@@ -125,22 +221,20 @@ func TestFullSweepUsesOneDurableRoundCadence(t *testing.T) {
 }
 
 func TestSlowSchedulerBoundaryConfirmationAndVerifiedAlternative(t *testing.T) {
-	fixture, server := newControllerFixture(t)
-	runner := testRunner(t, fixture, server)
+	fixture, runner := newDaemonFixture(t)
 	runner.Cfg.Selection.SevereDropPct = 20
 	runner.Cfg.Selection.NearBestPct = 20
 	runner.Cfg.Selection.SlowConfirmations = 2
 	runner.Cfg.Selection.MaxAge = 24 * time.Hour
 	runner.Cfg.Schedule.RecheckDelay = time.Millisecond
-	runner.Cfg.Speed.ConfirmBytes = 1024
 	group := config.Group{Name: "warp", Chain: "chain"}
 	past := []model.Sample{
-		{At: time.Now(), Node: "a", Provider: "airport", Scope: "front", Kind: "sweep", Mbps: 100, Attempts: 1},
-		{At: time.Now(), Node: "a", Provider: "airport", Scope: "front", Kind: "sweep", Mbps: 100, Attempts: 1},
-		{At: time.Now(), Node: "a", Provider: "airport", Scope: "front", Kind: "sweep", Mbps: 100, Attempts: 1},
-		{At: time.Now(), Node: "b", Provider: "airport", Scope: "front", Kind: "sweep", Mbps: 100, Attempts: 1},
+		daemonSample(runner, "a", "sweep", 100),
+		daemonSample(runner, "a", "sweep", 100),
+		daemonSample(runner, "a", "sweep", 100),
+		daemonSample(runner, "b", "sweep", 100),
 	}
-	initial := []model.Sample{{At: time.Now(), Node: "a", Provider: "airport", Scope: "front", Kind: "quick", Mbps: 80, Attempts: 1}}
+	initial := []model.Sample{daemonSample(runner, "a", "quick", 80)}
 
 	newRuntime := func(results []model.Sample) *daemonRuntime {
 		var mu sync.Mutex
@@ -168,7 +262,7 @@ func TestSlowSchedulerBoundaryConfirmationAndVerifiedAlternative(t *testing.T) {
 		return runtime
 	}
 
-	failedConfirmation := newRuntime([]model.Sample{{At: time.Now(), Node: "a", Provider: "airport", Scope: "front", Kind: "confirm", Mbps: 81, Attempts: 1}})
+	failedConfirmation := newRuntime([]model.Sample{daemonSample(runner, "a", "confirm", 81)})
 	failedConfirmation.considerSlow(context.Background(), group, "a", initial, past)
 	failedConfirmation.wg.Wait()
 	fixture.mu.Lock()
@@ -178,9 +272,17 @@ func TestSlowSchedulerBoundaryConfirmationAndVerifiedAlternative(t *testing.T) {
 	}
 	fixture.mu.Unlock()
 
+	changedProvider := daemonSample(runner, "a", "confirm", 70)
+	changedProvider.Provider = "replacement"
+	previous := daemonSample(runner, "a", "sweep", 100)
+	previous.Provider = changedProvider.Provider
+	replaced := newRuntime([]model.Sample{changedProvider})
+	replaced.considerSlow(context.Background(), group, "a", initial, append(past, previous))
+	replaced.wg.Wait()
+
 	confirmed := newRuntime([]model.Sample{
-		{At: time.Now(), Node: "a", Provider: "airport", Scope: "front", Kind: "confirm", Mbps: 79, Attempts: 1},
-		{At: time.Now(), Node: "b", Provider: "airport", Scope: "front", Kind: "confirm", Mbps: 100, Attempts: 1},
+		daemonSample(runner, "a", "confirm", 79),
+		daemonSample(runner, "b", "confirm", 100),
 	})
 	confirmed.considerSlow(context.Background(), group, "a", initial, past)
 	confirmed.wg.Wait()
@@ -192,22 +294,20 @@ func TestSlowSchedulerBoundaryConfirmationAndVerifiedAlternative(t *testing.T) {
 }
 
 func TestSlowSchedulerRemeasuresHistoricalAlternative(t *testing.T) {
-	fixture, server := newControllerFixture(t)
-	runner := testRunner(t, fixture, server)
+	fixture, runner := newDaemonFixture(t)
 	runner.Cfg.Selection.SevereDropPct = 20
 	runner.Cfg.Selection.NearBestPct = 20
 	runner.Cfg.Selection.SlowConfirmations = 2
 	runner.Cfg.Selection.MaxAge = 24 * time.Hour
 	runner.Cfg.Schedule.RecheckDelay = time.Millisecond
-	runner.Cfg.Speed.ConfirmBytes = 1024
 	group := config.Group{Name: "warp", Chain: "chain"}
 	past := []model.Sample{
-		{At: time.Now(), Node: "a", Scope: "front", Kind: "sweep", Mbps: 100},
-		{At: time.Now(), Node: "b", Scope: "front", Kind: "sweep", Mbps: 120},
+		daemonSample(runner, "a", "sweep", 100),
+		daemonSample(runner, "b", "sweep", 120),
 	}
 	results := []model.Sample{
-		{At: time.Now(), Node: "a", Scope: "front", Kind: "confirm", Mbps: 79, Attempts: 1},
-		{At: time.Now(), Node: "b", Scope: "front", Kind: "confirm", Mbps: 50, Attempts: 1},
+		daemonSample(runner, "a", "confirm", 79),
+		daemonSample(runner, "b", "confirm", 50),
 	}
 	index := 0
 	runtime := &daemonRuntime{
@@ -225,7 +325,7 @@ func TestSlowSchedulerRemeasuresHistoricalAlternative(t *testing.T) {
 			return result, nil
 		},
 	}
-	runtime.considerSlow(context.Background(), group, "a", []model.Sample{{Node: "a", Scope: "front", Kind: "quick", Mbps: 80}}, past)
+	runtime.considerSlow(context.Background(), group, "a", []model.Sample{daemonSample(runner, "a", "quick", 80)}, past)
 	runtime.wg.Wait()
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
@@ -238,15 +338,14 @@ func TestSlowSchedulerRemeasuresHistoricalAlternative(t *testing.T) {
 }
 
 func TestRepeatedAttributedDownloadFailureCanRecoverWithoutBaseline(t *testing.T) {
-	fixture, server := newControllerFixture(t)
-	runner := testRunner(t, fixture, server)
+	fixture, runner := newDaemonFixture(t)
 	runner.Cfg.Selection.SlowConfirmations = 2
 	runner.Cfg.Selection.MaxAge = 24 * time.Hour
 	runner.Cfg.Schedule.RecheckDelay = time.Millisecond
 	group := config.Group{Name: "warp", Chain: "chain"}
 	results := []model.Sample{
-		{At: time.Now(), Node: "a", Scope: "front", Kind: "confirm", Error: "connection reset", Attempts: 1, Failures: 1},
-		{At: time.Now(), Node: "b", Scope: "front", Kind: "confirm", Mbps: 90, Attempts: 1},
+		failedDaemonSample(runner, "a", "confirm", "connection reset"),
+		daemonSample(runner, "b", "confirm", 90),
 	}
 	index := 0
 	runtime := &daemonRuntime{
@@ -264,7 +363,7 @@ func TestRepeatedAttributedDownloadFailureCanRecoverWithoutBaseline(t *testing.T
 			return result, nil
 		},
 	}
-	initial := []model.Sample{{At: time.Now(), Node: "a", Scope: "front", Kind: "quick", Error: "zero payload", Attempts: 1, Failures: 1}}
+	initial := []model.Sample{failedDaemonSample(runner, "a", "quick", "zero payload")}
 	runtime.considerSlow(context.Background(), group, "a", initial, nil)
 	runtime.wg.Wait()
 	fixture.mu.Lock()
@@ -275,8 +374,7 @@ func TestRepeatedAttributedDownloadFailureCanRecoverWithoutBaseline(t *testing.T
 }
 
 func TestAttributedDownloadFailureStopsWhenConfirmationRecovers(t *testing.T) {
-	fixture, server := newControllerFixture(t)
-	runner := testRunner(t, fixture, server)
+	fixture, runner := newDaemonFixture(t)
 	runner.Cfg.Selection.SlowConfirmations = 2
 	runner.Cfg.Schedule.RecheckDelay = time.Millisecond
 	group := config.Group{Name: "warp", Chain: "chain"}
@@ -286,10 +384,10 @@ func TestAttributedDownloadFailureStopsWhenConfirmationRecovers(t *testing.T) {
 		groups: map[string]*groupRuntime{"warp": {current: "a"}},
 		measureFn: func(_ context.Context, node, _ string, _ int64) (model.Sample, error) {
 			measurements++
-			return model.Sample{At: time.Now(), Node: node, Scope: "front", Kind: "confirm", Mbps: 80, Attempts: 1}, nil
+			return daemonSample(runner, node, "confirm", 80), nil
 		},
 	}
-	initial := []model.Sample{{At: time.Now(), Node: "a", Scope: "front", Kind: "quick", Error: "connection reset", Attempts: 1, Failures: 1}}
+	initial := []model.Sample{failedDaemonSample(runner, "a", "quick", "connection reset")}
 	runtime.considerSlow(context.Background(), group, "a", initial, nil)
 	runtime.wg.Wait()
 	fixture.mu.Lock()
@@ -319,8 +417,7 @@ func TestSystemicMeasurementErrorDoesNotStartDegradationConfirmation(t *testing.
 }
 
 func TestBandwidthFailuresDoNotSwitchWhenEveryDownloadFails(t *testing.T) {
-	fixture, server := newControllerFixture(t)
-	runner := testRunner(t, fixture, server)
+	fixture, runner := newDaemonFixture(t)
 	runner.Cfg.Selection.SlowConfirmations = 2
 	runner.Cfg.Selection.MaxAge = 24 * time.Hour
 	runner.Cfg.Schedule.RecheckDelay = time.Millisecond
@@ -332,10 +429,10 @@ func TestBandwidthFailuresDoNotSwitchWhenEveryDownloadFails(t *testing.T) {
 			return []string{"a", "b"}, nil
 		},
 		measureFn: func(_ context.Context, node, _ string, _ int64) (model.Sample, error) {
-			return model.Sample{At: time.Now(), Node: node, Scope: "front", Kind: "confirm", Error: "connection reset", Attempts: 1, Failures: 1}, nil
+			return failedDaemonSample(runner, node, "confirm", "connection reset"), nil
 		},
 	}
-	initial := []model.Sample{{At: time.Now(), Node: "a", Scope: "front", Kind: "quick", Error: "connection reset", Attempts: 1, Failures: 1}}
+	initial := []model.Sample{failedDaemonSample(runner, "a", "quick", "connection reset")}
 	runtime.considerSlow(context.Background(), group, "a", initial, nil)
 	runtime.wg.Wait()
 	fixture.mu.Lock()
@@ -346,15 +443,14 @@ func TestBandwidthFailuresDoNotSwitchWhenEveryDownloadFails(t *testing.T) {
 }
 
 func TestMinimumBandwidthCanPrepareSwitchWithoutHistory(t *testing.T) {
-	fixture, server := newControllerFixture(t)
-	runner := testRunner(t, fixture, server)
+	fixture, runner := newDaemonFixture(t)
 	runner.Cfg.Selection.SlowConfirmations = 2
 	runner.Cfg.Selection.MaxAge = 24 * time.Hour
 	runner.Cfg.Schedule.RecheckDelay = time.Millisecond
 	group := config.Group{Name: "warp", Chain: "chain", MinMbps: 50}
 	results := []model.Sample{
-		{At: time.Now(), Node: "a", Scope: "front", Kind: "confirm", Mbps: 40, Attempts: 1},
-		{At: time.Now(), Node: "b", Scope: "front", Kind: "confirm", Mbps: 60, Attempts: 1},
+		daemonSample(runner, "a", "confirm", 40),
+		daemonSample(runner, "b", "confirm", 60),
 	}
 	index := 0
 	runtime := &daemonRuntime{
@@ -372,7 +468,7 @@ func TestMinimumBandwidthCanPrepareSwitchWithoutHistory(t *testing.T) {
 			return result, nil
 		},
 	}
-	initial := []model.Sample{{At: time.Now(), Node: "a", Scope: "front", Kind: "quick", Mbps: 40, Attempts: 1}}
+	initial := []model.Sample{daemonSample(runner, "a", "quick", 40)}
 	runtime.considerSlow(context.Background(), group, "a", initial, nil)
 	runtime.wg.Wait()
 	fixture.mu.Lock()
@@ -383,24 +479,33 @@ func TestMinimumBandwidthCanPrepareSwitchWithoutHistory(t *testing.T) {
 }
 
 func TestHealthyMeasurementCancelsPendingSlowRecheck(t *testing.T) {
-	fixture, server := newControllerFixture(t)
-	runner := testRunner(t, fixture, server)
+	runner := &Runner{Cfg: config.Config{Speed: config.Speed{QuickBytes: 256, SweepBytes: 4096}}}
 	runner.Cfg.Selection.SevereDropPct = 20
 	runner.Cfg.Selection.SlowConfirmations = 2
-	runner.Cfg.Schedule.RecheckDelay = 20 * time.Millisecond
+	runner.Cfg.Schedule.RecheckDelay = time.Hour
 	group := config.Group{Name: "warp", Chain: "chain"}
-	past := []model.Sample{{At: time.Now(), Node: "a", Scope: "front", Kind: "sweep", Mbps: 100}}
+	manual := daemonSample(runner, "a", "bench", 1000)
+	manual.Profile.Streams = 4
+	legacy := daemonSample(runner, "a", "sweep", 2000)
+	legacy.Profile = model.DownloadProfile{}
+	past := []model.Sample{manual, legacy, daemonSample(runner, "a", "sweep", 100)}
 	runtime := &daemonRuntime{
 		runner: runner,
 		groups: map[string]*groupRuntime{"warp": {current: "a"}},
-		measureFn: func(context.Context, string, string, int64) (model.Sample, error) {
-			t.Fatal("cancelled slow recheck performed a measurement")
-			return model.Sample{}, nil
-		},
 	}
-	runtime.considerSlow(context.Background(), group, "a", []model.Sample{{Node: "a", Scope: "front", Kind: "quick", Mbps: 80}}, past)
-	runtime.considerSlow(context.Background(), group, "a", []model.Sample{{Node: "a", Scope: "front", Kind: "quick", Mbps: 90}}, past)
-	runtime.wg.Wait()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		cancel()
+		runtime.wg.Wait()
+	}()
+	runtime.considerSlow(ctx, group, "a", []model.Sample{daemonSample(runner, "a", "quick", 80)}, past)
+	if !runtime.pendingMatches("warp", "a", 1) {
+		t.Fatal("quick result at the daemon drop boundary did not schedule confirmation")
+	}
+	runtime.considerSlow(ctx, group, "a", []model.Sample{daemonSample(runner, "a", "quick", 90)}, past)
+	if runtime.pendingMatches("warp", "a", 1) {
+		t.Fatal("healthy quick result did not cancel the pending confirmation")
+	}
 }
 
 func TestBackoffSequence(t *testing.T) {

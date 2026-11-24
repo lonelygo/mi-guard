@@ -61,7 +61,7 @@ func TestCheckReportDistinguishesFreshProbesHistoricalBandwidthAndTenure(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"链", "前置组", "本次探测可用 1/2，1 个未能确认", "当前 a", "HTTP 延迟 17 ms", "32.00 Mbps / 3.81 MiB/s", "已过期", "已选用 1h0m0s（自 guard 切换）", "最长选用记录 b 2h0m0s"} {
+	for _, want := range []string{"链", "前置组", "本次探测可用 1/2，1 个未能确认", "当前 a", "HTTP 延迟 17 ms", "32.00 Mbps / 3.81 MiB/s", "旧记录，流数未知", "已过期", "已选用 1h0m0s（自 guard 切换）", "最长选用记录 b 2h0m0s"} {
 		if !strings.Contains(report.String(), want) {
 			t.Errorf("missing %q in %s", want, report.String())
 		}
@@ -73,7 +73,7 @@ func TestCheckObservesStableSelectionAcrossChecksWithoutDownloads(t *testing.T) 
 	r, file := checkTestRunner(t, f.serveHTTP)
 	ctx := context.Background()
 	at := time.Now().UTC().Add(-time.Hour)
-	if err := r.Store.Record(ctx, model.Sample{Node: "a", Provider: "pool", Scope: "front", Kind: "bench", At: at, Mbps: 70, LatencyMS: 5}); err != nil {
+	if err := r.Store.Record(ctx, model.Sample{Node: "a", Provider: "pool", Scope: "front", Kind: "bench", At: at, Mbps: 70, LatencyMS: 5, Profile: r.Cfg.DownloadProfile(4, 16<<20)}); err != nil {
 		t.Fatal(err)
 	}
 	inspect := func() string {
@@ -84,7 +84,7 @@ func TestCheckObservesStableSelectionAcrossChecksWithoutDownloads(t *testing.T) 
 		}
 		return text.String()
 	}
-	if text := inspect(); !strings.Contains(text, "本次探测可用 2/2") ||
+	if text := inspect(); !strings.Contains(text, "本次探测可用 2/2") || !strings.Contains(text, "bench，4 流") ||
 		!strings.Contains(text, "首次观察，尚无更早记录") {
 		t.Fatalf("first report:\n%s", text)
 	}

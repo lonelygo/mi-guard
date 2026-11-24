@@ -150,7 +150,7 @@ func setMeasurement(sample *model.Sample, start time.Time) {
 	if sample.Bytes <= 0 || elapsed <= 0 {
 		return
 	}
-	sample.Mbps = float64(sample.Bytes*8) / elapsed.Seconds() / 1_000_000
+	sample.Mbps = float64(sample.Bytes) * 8 / elapsed.Seconds() / 1_000_000
 }
 
 func failedSample(sample model.Sample, err error) (model.Sample, error) {

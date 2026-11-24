@@ -92,8 +92,10 @@ mihomo-guard bench -g primary-group-2
 mihomo-guard bench -g '日本节点'
 mihomo-guard bench --node '控制器中显示的完整节点名'
 mihomo-guard bench --filter '日本|Japan|JP'
-# 临时切换为每节点四条下载流，总额度仍为 4 MiB
-mihomo-guard bench --filter 'JP' --bytes 4194304 --streams 4
+# 两流，每流最多 4 MiB，每节点最多 8 MiB
+mihomo-guard bench --filter 'JP' --streams 2 --bytes-per-stream 4194304
+# 限定每节点合计 4 MiB，四条流各分到 1 MiB
+mihomo-guard bench --filter 'JP' --streams 4 --bytes 4194304
 
 # 临时读取一个未加载到在线内核的 provider 文件或订阅 URL
 mihomo-guard bench --source path_to_your_provider.yaml -f 'JP|SG'
@@ -112,7 +114,11 @@ mihomo-guard bench -g '日本' --apply
 
 终端会立即显示当前节点、完成数、用时和预计剩余时间，每测完一个节点即显示其结果。进度写入标准错误，按下载速度排序的最终表格写入标准输出，方便重定向。表中 `Mbps` 为每秒百万比特，`MiB/s` 为每秒 1,048,576 字节，`HTTP ms` 为 204 探测延迟。`FAIL/TRY` 统计本轮应用层探测和下载的失败次数与尝试次数。
 
-在线模式只测专用测速组可达的物理节点。每条下载连接在发出请求前都会核对实际 selector 和节点，测完会恢复测速组原选择。与其他测速工具比较时，请选同一节点、下载地址、并发数、字节额度和超时。guard 默认从 Cloudflare 单流下载，每节点最多 4 MiB。clash-speedtest v1.8.8 默认从 Google 下载，每节点 4 流、目标 50 MiB。它在界面上显示的 `MB/s` 按 1024 进制换算，可直接对照这里的 `MiB/s` 列。[clash-speedtest 默认参数](https://github.com/faceair/clash-speedtest/blob/v1.8.8/main.go#L32-L38) · [上游速度单位](https://github.com/faceair/clash-speedtest/blob/v1.8.8/speedtester/speedtester.go#L420-L431)
+手动 `bench` 默认逐个节点测速，每个节点并发 **4 流 × 每流 4 MiB**，每节点最多 16 MiB，8 个节点一轮最多 128 MiB 下载响应体。每个节点开始时预留整份额度，余额不足即停止。正常结束或取消后按实际读取的响应体字节结算。四流的总吞吐量用所有流的实际字节总和除以同一段经过时间计算。
+
+可用 `speedtest.bench_streams`（1～8）和 `speedtest.bench_bytes_per_stream` 修改手动默认值。`--bytes` 保留每节点总上限的含义，与 `--bytes-per-stream` 互斥。升级后，旧配置中的 `streams_per_node: 1` 自动使用新的手动默认值。旧值 2～8 在未填写 `bench_streams` 时沿用为手动并发数。原有 `sweep_bytes` 继续控制 daemon 完整扫描。希望手测也用单流时可写 `bench_streams: 1`，或临时加 `--streams 1`。
+
+在线模式只测专用测速组可达的物理节点。每条下载连接在发出请求前都会核对实际 selector 和节点，测完会恢复测速组原选择。与其他测速工具比较时，请对齐节点、下载地址、并发数、每节点总额度和超时。guard 默认从 Cloudflare 下载。clash-speedtest v1.8.8 默认从 Google 下载，每节点 4 流、目标 50 MiB。它在界面上显示的 `MB/s` 按 1024 进制换算，可对照这里的 `MiB/s` 列。[clash-speedtest 默认参数](https://github.com/faceair/clash-speedtest/blob/v1.8.8/main.go#L32-L38) · [上游速度单位](https://github.com/faceair/clash-speedtest/blob/v1.8.8/speedtester/speedtester.go#L420-L431)
 
 `--source` 接受带顶层 `proxies` 列表的 Mihomo YAML，可重复使用。它用配置中 `stable_binary` 指定的 Mihomo 启动临时核心。临时核心关闭 TUN，通过临时回环监听和独立 selector 串行测速，退出后回收进程和临时文件。独立模式会核对启动后的版本，默认要求正式版。需要试验 alpha 时可显式设置 `mihomo.allow_prerelease: true`。两个模式共享同一个 guard 配置的账期预算。若系统级 TUN 接管其他进程流量，使用独立实例测试前应确认该核心进程到机场服务器的连接直出，或采用在线测速组。
 
@@ -130,9 +136,11 @@ mihomo-guard bench -g '日本' --apply
 
 例如当前节点的正常水平为 8 MB/s，降到 6.4 MB/s 就开始准备。若当初选中的节点为当时最快速度的 80%，再下降 20% 相当于那次最快速度的 64%。这个乘积只用来理解两个阈值，实际判断分别使用当前节点的历史基准和本轮各候选的新测量。
 
-带宽探测分别统计一次 204 和一次有界下载，响应体中断会记录失败。冷启动缺少历史时，可以在组上设置绝对下限 `min_mbps`。连续下载失败也会触发确认。连续两次链路硬故障可以越过性能冷静期。
+带宽探测分别统计一次 204 和一次有界下载，响应体中断会记录失败。冷启动缺少历史时，可以在组上设置绝对下限 `min_mbps`。该下限使用本次实测的 Mbps，daemon 取单流速度，手动 `--apply` 取所选流数的合计速度。连续下载失败也会触发确认。连续两次链路硬故障可以越过性能冷静期。
 
-同档候选比较应用层探测失败比例和历史低分位带宽，平手时优先留用原节点。历史记录含探测次数，HTTP 请求失败率用于描述线路可用性。每个周期 16 个节点各读满 4 MiB，每天两轮，30 天共 3.75 GiB 下载响应体。单节点默认单流，可用 `speedtest.streams_per_node` 配置 1～8 流，所有流平分节点总额度。协议开销和机场计费倍率另计。守护进程与手动命令共用配置和历史文件，互斥访问测速组、原子更新 JSON，进程异常退出时预留字节暂按已用处理。
+同档候选比较应用层探测失败比例和历史低分位带宽，平手时优先留用原节点。手动 `bench --apply` 使用本轮实测，并只参考相同节点、provider、路径、流数、请求额度、探测地址和超时的手测历史。第一次四流测试可直接选线。daemon 的降速基准来自它自己的单流扫描和复测。两种模式共用每个 provider 和节点的历史窗口，默认保留最近 50 条。窗口内缺少测速参数的旧记录仍可在 `check` 中看到，选线从有完整参数的样本开始积累。
+
+daemon 的完整扫描、快筛和复测固定单流。以完整扫描为例，16 个节点每个读满 4 MiB，每天两轮，30 天共 3.75 GiB 下载响应体。手动命令与 daemon 共用同一账期预算，协议开销和机场计费倍率另计。guard 互斥访问测速组、原子更新 JSON，进程异常退出时预留字节暂按已用处理。
 
 切换时先调整 `primary-group-1` / `primary-group-2`，再验证相应的 `dialer-proxy-1` / `dialer-proxy-2` 链。第一组可按预期 Google 地区顺位尝试。验证成功后，在候选仍属于直出组的前提下，尽力同步 `direct-group-1` / `direct-group-2`。直出跟随失败只影响直出组。守护进程会接纳手动选线，并在换线前重新读取当前选择。
 

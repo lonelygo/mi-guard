@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -281,6 +282,9 @@ func (s *Store) record(state *diskState, sample model.Sample) {
 		state.Heartbeats[key] = agg
 		return
 	}
+	if p := sample.Profile; p.Known() {
+		sample.Scope = fmt.Sprintf("%s%d/%d/%s/%s", downloadScopePrefix, p.Streams, p.TotalBytes, p.Target, sample.Scope)
+	}
 	state.Samples = append(state.Samples, sample)
 	state.Samples = retainSamples(state.Samples, s.window)
 }
@@ -422,14 +426,38 @@ func snapshotOf(state diskState) Snapshot {
 		heartbeats = append(heartbeats, heartbeat)
 	}
 	sort.Slice(heartbeats, func(i, j int) bool { return heartbeats[i].Scope < heartbeats[j].Scope })
+	samples := append([]model.Sample(nil), state.Samples...)
+	for i := range samples {
+		samples[i].Scope, samples[i].Profile = readDownloadScope(samples[i].Scope)
+	}
 	return Snapshot{
-		Samples:      append([]model.Sample(nil), state.Samples...),
+		Samples:      samples,
 		Heartbeats:   heartbeats,
 		UsedBytes:    state.UsedBytes,
 		PendingBytes: pending,
 		CycleStart:   state.CycleStart,
 		LastSweep:    state.LastSweep,
 	}
+}
+
+// v0.1.x rejects unknown JSON fields. Qualifying the route in the same record
+// keeps the sample and its actual byte charge atomic across mixed versions.
+const downloadScopePrefix = "download/v1/"
+
+func readDownloadScope(scope string) (string, model.DownloadProfile) {
+	if raw, ok := strings.CutPrefix(scope, downloadScopePrefix); ok {
+		parts := strings.SplitN(raw, "/", 4) // the route itself can contain slashes
+		if len(parts) == 4 && parts[3] != "" && len(parts[2]) == 64 {
+			streams, errStreams := strconv.Atoi(parts[0])
+			total, errTotal := strconv.ParseInt(parts[1], 10, 64)
+			_, errTarget := hex.DecodeString(parts[2])
+			p := model.DownloadProfile{Streams: streams, TotalBytes: total, Target: parts[2]}
+			if errStreams == nil && errTotal == nil && errTarget == nil && p.Known() {
+				return parts[3], p
+			}
+		}
+	}
+	return scope, model.DownloadProfile{}
 }
 
 func newDiskState(start time.Time) diskState {

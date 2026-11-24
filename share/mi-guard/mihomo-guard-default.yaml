@@ -34,14 +34,16 @@ speedtest:
   geo_url: https://www.google.com/searchdomaincheck?format=domain # 返回出口对应的域名文本。
   trace_url: https://www.cloudflare.com/cdn-cgi/trace   # 补充记录 IP、colo 和 loc。空字符串可关闭。
   timeout: 8s                 # 下载、地区检查及监听入口核验的超时，须大于 0。
-  streams_per_node: 1         # 每节点 1 到 8 条下载流，共享该节点本次测速的总额度。
-  sweep_bytes: 4194304        # 4 MiB。完整扫描和手动 bench 每节点的响应体上限。
+  bench_streams: 4            # 手动 bench 每节点并发下载流数，范围 1 到 8。daemon 固定单流。
+  bench_bytes_per_stream: 4194304 # 手动 bench 每流最多 4 MiB，默认每节点共 16 MiB。
+  sweep_bytes: 4194304        # 4 MiB。daemon 完整扫描每节点的响应体上限。
   quick_bytes: 1048576        # 1 MiB。在用节点一次快筛的响应体上限。
   confirm_bytes: 8388608      # 8 MiB。降速确认时每个复测节点的响应体上限。
   monthly_bytes: 6442450944   # 6 GiB。同一 history.file 下，daemon、bench 和 --source 共用的账期预算。
   billing_day: 1              # 每月本地日期的第 1 到 28 日。首次建立账本前设定，已有账本会校验起始日。
-# 四个字节额度均须大于 0。正常结算按实际读取的下载响应体计费，进程意外退出时预留量仍占预算。
-# 机场的流量倍率、协议开销需另计。bench --bytes 和 --streams 可以只覆盖当次手动测速。
+# 字节额度均须大于 0。正常结算按实际读取的下载响应体计费，进程意外退出时预留量仍占预算。
+# bench --streams 和 --bytes-per-stream 可覆盖当次手动测速。--bytes 单独指定本次每节点的总额度。
+# 机场的流量倍率、协议开销需另计。
 
 selection:
   severe_drop_pct: 20         # 降速确认门槛（大于 0、小于 100）。默认当前速度降至历史正常中位数的 80% 即复测。

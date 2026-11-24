@@ -154,6 +154,10 @@ func (r *Runner) candidates(ctx context.Context, group string, benchScan, apply 
 }
 
 func (r *Runner) Measure(ctx context.Context, node, kind string, limit int64) (s model.Sample, err error) {
+	streams := 1
+	if kind == "bench" {
+		streams = r.Cfg.Speed.BenchStreams
+	}
 	err = withSelectorLock(ctx, "measure", func() (err error) {
 		p, err := r.Core.Proxy(ctx, node)
 		if err != nil {
@@ -169,6 +173,25 @@ func (r *Runner) Measure(ctx context.Context, node, kind string, limit int64) (s
 		}
 		if before.Type != "Selector" || !slices.Contains(before.All, node) {
 			return fmt.Errorf("%s is not an available member of test selector %s", model.QuoteName(node), model.QuoteName(group))
+		}
+		// A measurement without a full grant must leave the live selector alone.
+		res, err := r.Store.Reserve(ctx, limit, r.Cfg.Speed.MonthlyBytes)
+		if err != nil {
+			return err
+		}
+		attributed := false
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			if attributed {
+				err = errors.Join(err, r.Store.Finish(closeCtx, res, s))
+			} else {
+				err = errors.Join(err, r.Store.Discard(closeCtx, res, s.Bytes))
+				s = model.Sample{}
+			}
+		}()
+		if res.Bytes < limit {
+			return fmt.Errorf("%w: need %d bytes, %d available", history.ErrBudget, limit, res.Bytes)
 		}
 		if before.Now != node {
 			defer func() {
@@ -193,25 +216,7 @@ func (r *Runner) Measure(ctx context.Context, node, kind string, limit int64) (s
 		if selected.Now != node {
 			return errors.New("test selector changed before measurement")
 		}
-		res, err := r.Store.Reserve(ctx, limit, r.Cfg.Speed.MonthlyBytes)
-		if err != nil {
-			return err
-		}
-		attributed := false
-		defer func() {
-			closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cancel()
-			if attributed {
-				err = errors.Join(err, r.Store.Finish(closeCtx, res, s))
-			} else {
-				err = errors.Join(err, r.Store.Discard(closeCtx, res, s.Bytes))
-				s = model.Sample{}
-			}
-		}()
-		if res.Bytes < limit {
-			return fmt.Errorf("%w: need %d bytes, %d available", history.ErrBudget, limit, res.Bytes)
-		}
-		s = model.Sample{At: time.Now().UTC(), Scope: "front", Kind: kind, Node: node, ProxyType: p.Type, Provider: p.Provider, Attempts: 1}
+		s = model.Sample{At: time.Now().UTC(), Scope: "front", Kind: kind, Node: node, ProxyType: p.Type, Provider: p.Provider, Attempts: 1, Profile: r.Cfg.DownloadProfile(streams, limit)}
 		if p.Dialer != "" {
 			s.Scope = "chain:" + node
 		}
@@ -227,7 +232,7 @@ func (r *Runner) Measure(ctx context.Context, node, kind string, limit int64) (s
 			return nil
 		}
 		s.Attempts++
-		d, downloadErr := probe.DownloadBatch(ctx, r.Cfg.Mihomo.TestProxy, r.Cfg.Speed.URL, res.Bytes, r.Cfg.Speed.Timeout, r.Cfg.Speed.Streams, r.route(group, node))
+		d, downloadErr := probe.DownloadBatch(ctx, r.Cfg.Mihomo.TestProxy, r.Cfg.Speed.URL, res.Bytes, r.Cfg.Speed.Timeout, streams, r.route(group, node))
 		s.Bytes, s.ElapsedMS, s.Mbps = d.Bytes, d.ElapsedMS, d.Mbps
 		if ctx.Err() != nil {
 			return ctx.Err()

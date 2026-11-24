@@ -15,8 +15,6 @@ import (
 	"github.com/lonelygo/mi-guard/internal/model"
 )
 
-const maxDownloadStreams = 8
-
 // DownloadBatch downloads one total byte grant over one or more verified
 // tunnels. Every stream reaches the route-verification barrier before any HTTP
 // payload request starts.
@@ -25,8 +23,8 @@ func DownloadBatch(ctx context.Context, proxyURL, downloadURL string, limit int6
 		return DownloadChecked(ctx, proxyURL, downloadURL, limit, timeout, check)
 	}
 	sample := model.Sample{At: time.Now().UTC()}
-	if streams < 1 || streams > maxDownloadStreams {
-		return failedSample(sample, fmt.Errorf("download streams must be between 1 and %d", maxDownloadStreams))
+	if streams < 1 || streams > model.MaxDownloadStreams {
+		return failedSample(sample, fmt.Errorf("download streams must be between 1 and %d", model.MaxDownloadStreams))
 	}
 	if limit < int64(streams) {
 		return failedSample(sample, errors.New("download byte limit must provide at least one byte per stream"))

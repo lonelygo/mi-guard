@@ -31,6 +31,51 @@ func TestInitAndDefaults(t *testing.T) {
 	if c.Notifications.Helper != AutoNotificationHelper {
 		t.Fatalf("notification helper = %q, want auto", c.Notifications.Helper)
 	}
+	if limit, err := c.Speed.BenchTotalBytes(); err != nil || limit != 16<<20 || c.Speed.BenchStreams != 4 || c.Speed.SweepBytes != 4<<20 {
+		t.Fatalf("manual cap = %d, speeds = %+v, err = %v", limit, c.Speed, err)
+	}
+}
+
+func TestManualStreamConfigUpgrade(t *testing.T) {
+	for _, tc := range []struct {
+		settings string
+		streams  int
+	}{
+		{"streams_per_node: 1", 4},
+		{"streams_per_node: 3", 3},
+		{"streams_per_node: 3, bench_streams: 1", 1},
+		{"bench_streams: 2", 2},
+	} {
+		path := filepath.Join(t.TempDir(), "guard.yaml")
+		if err := os.WriteFile(path, []byte("speedtest: {"+tc.settings+", sweep_bytes: 128}"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(path)
+		if err != nil || c.Speed.BenchStreams != tc.streams || c.Speed.BenchBytesPerStream != 4<<20 || c.Speed.SweepBytes != 128 {
+			t.Errorf("upgrade %q: got %+v, %v", tc.settings, c.Speed, err)
+		}
+	}
+}
+
+func TestDownloadProfileTracksMeasurementSettings(t *testing.T) {
+	cfg := Config{Speed: Speed{URL: "https://probe.test/data?token=secret", Timeout: time.Second, LivenessURL: "https://probe.test/204"}, Schedule: Schedule{HeartbeatTimeout: time.Second}}
+	p := cfg.DownloadProfile(4, 16<<20)
+	if !p.Known() || p.Streams != 4 || p.TotalBytes != 16<<20 || len(p.Target) != 64 || strings.Contains(p.Target, "secret") {
+		t.Fatalf("invalid download profile %+v", p)
+	}
+	if single := cfg.DownloadProfile(1, 4<<20); single == p || single.Target != p.Target {
+		t.Fatalf("same endpoints should share a target fingerprint: %+v, %+v", p, single)
+	}
+	for _, change := range []func(*Config){
+		func(c *Config) { c.Speed.URL += "2" }, func(c *Config) { c.Speed.LivenessURL += "2" },
+		func(c *Config) { c.Speed.Timeout++ }, func(c *Config) { c.Schedule.HeartbeatTimeout++ },
+	} {
+		other := cfg
+		change(&other)
+		if other.DownloadProfile(4, 16<<20) == p {
+			t.Errorf("endpoint or timeout change kept stale profile: %+v", other)
+		}
+	}
 }
 
 func TestDefaultReferenceUsesPublicPlaceholders(t *testing.T) {
@@ -130,6 +175,9 @@ func TestInvalidGuardConfiguration(t *testing.T) {
 	for _, content := range []string{
 		"selection: {severe_drop_pct: 100}", "selection: {severe_drop_pct: 0}", "unknown_field: true",
 		"mihomo: {controller: 'http://example.test:9090'}", "speedtest: {billing_day: 29}",
+		"speedtest: {bench_streams: 0}", "speedtest: {bench_streams: 9}", "speedtest: {streams_per_node: 0}",
+		"speedtest: {streams_per_node: 3, bench_streams: 0}", "speedtest: {bench_bytes_per_stream: 0}",
+		"speedtest: {bench_bytes_per_stream: 9223372036854775807}",
 		"groups: [{name: mi-guard-bench, chain: other}]",
 		"groups: [{name: TW}]", "groups: [{name: TW, mode: chain}]",
 		"groups: [{name: TW, mode: selector, chain: Exit}]", "groups: [{name: TW, mode: selector, direct: Mirror}]",

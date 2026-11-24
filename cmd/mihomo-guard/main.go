@@ -67,11 +67,41 @@ func (f *stringsFlag) Set(s string) error {
 }
 
 type benchOptions struct {
-	bytes          int64
-	streams        int
-	group, filter  string
-	nodes, sources stringsFlag
-	apply          bool
+	bytes, bytesPerStream int64
+	streams               int
+	group, filter         string
+	nodes, sources        stringsFlag
+	apply                 bool
+}
+
+func (o *benchOptions) configureDownloads(speed *config.Speed, flags *flag.FlagSet) error {
+	set := make(map[string]bool)
+	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if set["bytes"] && set["bytes-per-stream"] {
+		return errors.New("choose either --bytes (per node) or --bytes-per-stream")
+	}
+	if set["streams"] {
+		if o.streams < 1 || o.streams > model.MaxDownloadStreams {
+			return fmt.Errorf("--streams must be from 1 to %d", model.MaxDownloadStreams)
+		}
+		speed.BenchStreams = o.streams
+	}
+	if set["bytes"] {
+		if o.bytes < int64(speed.BenchStreams) {
+			return errors.New("--bytes must provide at least one byte per stream")
+		}
+		return nil
+	}
+	if set["bytes-per-stream"] {
+		speed.BenchBytesPerStream = o.bytesPerStream
+	}
+	var err error
+	o.bytes, err = speed.BenchTotalBytes()
+	if err != nil && set["bytes-per-stream"] {
+		return fmt.Errorf("--bytes-per-stream: %w", err)
+	}
+	o.bytesPerStream = speed.BenchBytesPerStream
+	return err
 }
 
 func main() {
@@ -125,8 +155,9 @@ func run(ctx context.Context, args []string) error {
 	var live bool
 	switch cmd {
 	case "bench":
-		fs.Int64Var(&opt.bytes, "bytes", 0, "total response-byte cap per node (default from config)")
-		fs.IntVar(&opt.streams, "streams", 0, "parallel downloads per node (1–8, share --bytes)")
+		fs.Int64Var(&opt.bytes, "bytes", 0, "total download bytes per node, shared across streams (overrides the per-stream cap)")
+		fs.Int64Var(&opt.bytesPerStream, "bytes-per-stream", 0, "download byte cap for each stream (from config, initially 4 MiB)")
+		fs.IntVar(&opt.streams, "streams", 0, "parallel downloads per node (1–8, from config, initially 4)")
 		fs.StringVar(&opt.group, "g", "", "group or dialer chain; exact name or unique substring")
 		fs.StringVar(&opt.group, "group", "", "group or dialer chain; exact name or unique substring")
 		fs.StringVar(&opt.filter, "f", "", "node name regexp")
@@ -163,25 +194,8 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	if cmd == "bench" {
-		var invalid error
-		fs.Visit(func(f *flag.Flag) {
-			switch f.Name {
-			case "bytes":
-				if opt.bytes <= 0 {
-					invalid = errors.New("--bytes must be positive")
-				} else {
-					c.Speed.SweepBytes = opt.bytes
-				}
-			case "streams":
-				if opt.streams < 1 || opt.streams > 8 {
-					invalid = errors.New("--streams must be from 1 to 8")
-				} else {
-					c.Speed.Streams = opt.streams
-				}
-			}
-		})
-		if invalid != nil {
-			return invalid
+		if err := opt.configureDownloads(&c.Speed, fs); err != nil {
+			return err
 		}
 	}
 	if cmd == "notify-setup" {
@@ -402,9 +416,13 @@ func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benc
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "下载目标 %s · 每节点 %d 流 · 上限 %s · 超时 %s\n", displayText(endpoint.Host), r.Cfg.Speed.Streams, byteCount(r.Cfg.Speed.SweepBytes), r.Cfg.Speed.Timeout)
+	capacity := fmt.Sprintf("每节点共 %s，按流均分", byteCount(o.bytes))
+	if o.bytesPerStream > 0 {
+		capacity = fmt.Sprintf("每流上限 %s，每节点共 %s", byteCount(o.bytesPerStream), byteCount(o.bytes))
+	}
+	fmt.Fprintf(os.Stderr, "下载目标 %s · 每节点 %d 流 · %s · 超时 %s\n", displayText(endpoint.Host), r.Cfg.Speed.BenchStreams, capacity, r.Cfg.Speed.Timeout)
 	progress := newBenchProgress(os.Stderr, stderrColumns())
-	results, scanErr := r.ScanWithProgress(ctx, nodes, "bench", r.Cfg.Speed.SweepBytes, progress.update)
+	results, scanErr := r.ScanWithProgress(ctx, nodes, "bench", o.bytes, progress.update)
 	progress.close()
 	printResults(os.Stdout, results)
 	if scanErr != nil {

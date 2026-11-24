@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -49,6 +50,26 @@ func Load(path string) (Config, error) {
 	}
 	if err = yaml.UnmarshalStrict(b, &c); err != nil {
 		return c, fmt.Errorf("guard YAML: %w", err)
+	}
+	if old := c.Speed.LegacyStreams; old != nil {
+		if *old < 1 || *old > model.MaxDownloadStreams {
+			return c, fmt.Errorf("streams_per_node must be from 1 to %d", model.MaxDownloadStreams)
+		}
+		// Old init files wrote 1. Only carry forward an explicitly customized
+		// concurrent setting when the new manual setting is absent.
+		if *old > 1 {
+			var explicit struct {
+				Speed struct {
+					BenchStreams *int `yaml:"bench_streams"`
+				} `yaml:"speedtest"`
+			}
+			if err := yaml.Unmarshal(b, &explicit); err != nil {
+				return c, err
+			}
+			if explicit.Speed.BenchStreams == nil {
+				c.Speed.BenchStreams = *old
+			}
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -100,8 +121,8 @@ func (c Config) validate() error {
 		return errors.New("invalid selection percentage, confirmations (minimum 2) or max_sample_age")
 	}
 	t := c.Speed
-	if t.Streams < 1 || t.Streams > 8 {
-		return errors.New("streams_per_node must be from 1 to 8")
+	if _, err := t.BenchTotalBytes(); err != nil {
+		return err
 	}
 	if t.Timeout <= 0 || t.SweepBytes <= 0 || t.QuickBytes <= 0 || t.ConfirmBytes <= 0 || t.MonthlyBytes <= 0 || t.BillingDay < 1 || t.BillingDay > 28 || c.History.SamplesPerNode < 1 {
 		return errors.New("invalid speedtest limits, billing_day or samples_per_node")
@@ -166,6 +187,24 @@ func (c Config) validate() error {
 		}
 	}
 	return nil
+}
+
+// BenchTotalBytes is the full reservation for one manual node.
+func (s Speed) BenchTotalBytes() (int64, error) {
+	if s.BenchStreams < 1 || s.BenchStreams > model.MaxDownloadStreams {
+		return 0, fmt.Errorf("bench_streams must be from 1 to %d", model.MaxDownloadStreams)
+	}
+	if s.BenchBytesPerStream <= 0 || s.BenchBytesPerStream > math.MaxInt64/int64(s.BenchStreams) {
+		return 0, errors.New("bench_bytes_per_stream must be positive and the per-node total must fit in int64")
+	}
+	return s.BenchBytesPerStream * int64(s.BenchStreams), nil
+}
+
+// DownloadProfile fingerprints the settings that affect throughput and probe
+// reliability without persisting URLs which might contain private tokens.
+func (c Config) DownloadProfile(streams int, totalBytes int64) model.DownloadProfile {
+	settings := fmt.Sprintf("%s\x00%d\x00%s\x00%d", c.Speed.URL, c.Speed.Timeout, c.Speed.LivenessURL, c.Schedule.HeartbeatTimeout)
+	return model.DownloadProfile{Streams: streams, TotalBytes: totalBytes, Target: fmt.Sprintf("%x", sha256.Sum256([]byte(settings)))}
 }
 
 func pct(v float64) bool { return v >= 0 && v <= 100 }

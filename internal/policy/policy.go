@@ -10,21 +10,13 @@ import (
 )
 
 // Baseline returns the median of preceding comparable bandwidth samples.
-// Quick samples are deliberately excluded because their smaller transfer size
-// is biased. Failed downloads and measurements from other routes or providers
-// are not comparable.
-func Baseline(node, provider string, samples []model.Sample) float64 {
-	values := make([]float64, 0, len(samples))
-	for _, sample := range samples {
-		if sample.Node != node || sample.Provider != provider || !historical(sample) {
-			continue
-		}
-		values = append(values, sample.Mbps)
-	}
+// Quick probes can trigger a comparison, but their smaller transfers do not
+// contribute to the baseline.
+func Baseline(sample model.Sample, past []model.Sample) float64 {
+	values := statsFor(sample, past).bandwidth
 	if len(values) == 0 {
 		return 0
 	}
-	sort.Float64s(values)
 	return percentile(values, 0.5)
 }
 
@@ -45,7 +37,7 @@ func Rank(current string, fresh, past []model.Sample, tolerance float64) []model
 	latest := make(map[string]model.Sample)
 	order := make(map[string]int)
 	for index, sample := range fresh {
-		if !freshValid(sample) {
+		if !HasBandwidth(sample) {
 			continue
 		}
 		key := identity(sample)
@@ -72,14 +64,16 @@ func Rank(current string, fresh, past []model.Sample, tolerance float64) []model
 	preferred := make([]ranked, 0, len(latest))
 	fallback := make([]ranked, 0, len(latest))
 	for _, sample := range latest {
-		reliability := aggregateReliability(sample, past)
+		stats := statsFor(sample, past)
 		item := ranked{
-			sample:       sample,
-			riskNum:      int64(reliability.failures + 1),
-			riskDen:      int64(reliability.attempts + 2),
-			historyLow:   historicalLow(sample, past),
-			historyKnown: historicalCount(sample, past) >= 3,
-			current:      sample.Node == current,
+			sample:  sample,
+			riskNum: int64(stats.failures + 1),
+			riskDen: int64(stats.attempts + 2),
+			current: sample.Node == current,
+		}
+		if len(stats.bandwidth) >= 3 {
+			item.historyKnown = true
+			item.historyLow = percentile(stats.bandwidth, 0.25)
 		}
 		if sample.Mbps >= threshold {
 			preferred = append(preferred, item)
@@ -143,74 +137,70 @@ func fallbackLess(left, right ranked) bool {
 	return identity(left.sample) < identity(right.sample)
 }
 
-func historical(sample model.Sample) bool {
-	if sample.Scope != "front" || sample.Error != "" || !finitePositive(sample.Mbps) {
-		return false
-	}
-	switch sample.Kind {
-	case "sweep", "bench", "confirm":
-		return true
-	default:
-		return false
-	}
-}
-
-func freshValid(sample model.Sample) bool {
+// HasBandwidth reports whether a named node produced a successful finite speed.
+func HasBandwidth(sample model.Sample) bool {
 	return sample.Node != "" && sample.Error == "" && finitePositive(sample.Mbps)
 }
 
-func historicalLow(sample model.Sample, past []model.Sample) float64 {
-	values := make([]float64, 0)
-	for _, old := range past {
-		if old.Node == sample.Node && old.Provider == sample.Provider && historical(old) {
-			values = append(values, old.Mbps)
-		}
-	}
-	if len(values) < 3 {
-		return 0
-	}
-	sort.Float64s(values)
-	return percentile(values, 0.25)
+func daemonKind(kind string) bool {
+	return kind == "sweep" || kind == "quick" || kind == "confirm"
 }
 
-func historicalCount(sample model.Sample, past []model.Sample) int {
-	count := 0
-	for _, old := range past {
-		if sameRoute(sample, old) && historical(old) {
-			count++
-		}
+// Comparable reports whether two measurements belong to the same history.
+// Benchmarks require identical profiles. Daemon quick, sweep and confirmation
+// probes intentionally share evidence across their single-flow transfer sizes.
+func Comparable(fresh, old model.Sample) bool {
+	if fresh.Node != old.Node || fresh.Provider != old.Provider || fresh.Scope == "" || fresh.Scope != old.Scope ||
+		!fresh.Profile.Known() || !old.Profile.Known() {
+		return false
 	}
-	return count
+	if fresh.Kind == "bench" {
+		return old.Kind == "bench" && fresh.Profile == old.Profile
+	}
+	return daemonKind(fresh.Kind) && daemonKind(old.Kind) && fresh.Profile.Streams == 1 &&
+		old.Profile.Streams == 1 && fresh.Profile.Target == old.Profile.Target
 }
 
-type reliability struct {
-	attempts int
-	failures int
+type sampleStats struct {
+	bandwidth []float64
+	attempts  int
+	failures  int
 }
 
 const maxReliabilityObservations = 1_000_000_000
 
-func aggregateReliability(sample model.Sample, past []model.Sample) reliability {
-	result := reliability{}
-	seen := make(map[sampleFingerprint]struct{}, len(past)+1)
-	observations := make([]model.Sample, 0, len(past)+1)
-	observations = append(observations, past...)
-	observations = append(observations, sample)
-	for _, observation := range observations {
-		if !sameRoute(sample, observation) || !probeComparable(observation) {
+func statsFor(sample model.Sample, past []model.Sample) sampleStats {
+	var stats sampleStats
+	seen := make(map[sampleFingerprint]struct{})
+	fresh := fingerprintOf(sample)
+	for _, old := range past {
+		if !Comparable(sample, old) {
 			continue
 		}
-		fingerprint := fingerprintOf(observation)
-		if _, duplicate := seen[fingerprint]; duplicate {
+		id := fingerprintOf(old)
+		if _, duplicate := seen[id]; duplicate {
 			continue
 		}
-		seen[fingerprint] = struct{}{}
-		attempts := min(max(observation.Attempts, 0), maxReliabilityObservations)
-		failures := min(max(observation.Failures, 0), attempts)
-		result.attempts = min(result.attempts+attempts, maxReliabilityObservations)
-		result.failures = min(result.failures+failures, result.attempts)
+		seen[id] = struct{}{}
+		if old.Kind != "quick" && HasBandwidth(old) {
+			stats.bandwidth = append(stats.bandwidth, old.Mbps)
+		}
+		if id != fresh {
+			stats.addProbes(old)
+		}
 	}
-	return result
+	if sample.Kind == "bench" || daemonKind(sample.Kind) {
+		stats.addProbes(sample)
+	}
+	sort.Float64s(stats.bandwidth)
+	return stats
+}
+
+func (s *sampleStats) addProbes(sample model.Sample) {
+	attempts := min(max(sample.Attempts, 0), maxReliabilityObservations)
+	failures := min(max(sample.Failures, 0), attempts)
+	s.attempts = min(s.attempts+attempts, maxReliabilityObservations)
+	s.failures = min(s.failures+failures, s.attempts)
 }
 
 type sampleFingerprint struct {
@@ -219,6 +209,7 @@ type sampleFingerprint struct {
 	provider     string
 	scope        string
 	kind         string
+	profile      model.DownloadProfile
 	mbps         uint64
 	bytes        int64
 	elapsed      int64
@@ -235,6 +226,7 @@ func fingerprintOf(sample model.Sample) sampleFingerprint {
 		provider:     sample.Provider,
 		scope:        sample.Scope,
 		kind:         sample.Kind,
+		profile:      sample.Profile,
 		mbps:         math.Float64bits(sample.Mbps),
 		bytes:        sample.Bytes,
 		elapsed:      sample.ElapsedMS,
@@ -242,22 +234,6 @@ func fingerprintOf(sample model.Sample) sampleFingerprint {
 		attempts:     sample.Attempts,
 		failures:     sample.Failures,
 		errorMessage: sample.Error,
-	}
-}
-
-func sameRoute(fresh, observation model.Sample) bool {
-	return fresh.Node == observation.Node && fresh.Provider == observation.Provider && observation.Scope == "front"
-}
-
-func probeComparable(sample model.Sample) bool {
-	if sample.Scope != "front" {
-		return false
-	}
-	switch sample.Kind {
-	case "sweep", "bench", "confirm", "quick":
-		return true
-	default:
-		return false
 	}
 }
 

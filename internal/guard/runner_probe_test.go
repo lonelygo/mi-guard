@@ -3,18 +3,42 @@ package guard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/lonelygo/mi-guard/internal/history"
 	"github.com/lonelygo/mi-guard/internal/model"
 )
+
+func TestInsufficientDownloadBudgetLeavesSelectorUntouched(t *testing.T) {
+	fixture, server := newControllerFixture(t)
+	runner := testRunner(t, fixture, server)
+	runner.Cfg.Speed.BenchStreams = 4
+	runner.Cfg.Speed.MonthlyBytes = (16 << 20) - 1
+	ctx := context.Background()
+	s, err := runner.Measure(ctx, "b", "bench", 16<<20)
+	if !errors.Is(err, history.ErrBudget) || s != (model.Sample{}) {
+		t.Fatalf("insufficient budget: sample=%+v error=%v", s, err)
+	}
+	snapshot, err := runner.Store.Snapshot(ctx)
+	if err != nil || snapshot.UsedBytes != 0 || snapshot.PendingBytes != 0 || len(snapshot.Samples) != 0 {
+		t.Fatalf("insufficient budget: snapshot=%+v error=%v", snapshot, err)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if len(fixture.writes) != 0 || len(fixture.delayNames) != 0 {
+		t.Fatalf("unfunded measurement wrote selectors %v or probed %v", fixture.writes, fixture.delayNames)
+	}
+}
 
 func TestScanPersistsConciseProbeFailuresAndContinues(t *testing.T) {
 	fixture, server := newControllerFixture(t)
 	fixture.failing["a"], fixture.failing["b"] = true, true
 	runner := testRunner(t, fixture, server)
+	runner.Cfg.Speed.BenchStreams = 4
 	runner.Cfg.Speed.MonthlyBytes = 2048
 	var progress []ScanProgress
 	samples, err := runner.ScanWithProgress(context.Background(), []string{"a", "a", "b"}, "bench", 512, func(e ScanProgress) {
@@ -44,6 +68,9 @@ func TestScanPersistsConciseProbeFailuresAndContinues(t *testing.T) {
 		}
 		if snapshot.Samples[i].Error != got.Error {
 			t.Fatalf("persisted error = %q, want %q", snapshot.Samples[i].Error, got.Error)
+		}
+		if want := runner.Cfg.DownloadProfile(4, 512); got.Profile != want || snapshot.Samples[i].Profile != want {
+			t.Fatalf("missing failed-probe profile: got %+v, stored %+v", got.Profile, snapshot.Samples[i].Profile)
 		}
 	}
 }
