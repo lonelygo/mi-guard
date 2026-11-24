@@ -37,6 +37,18 @@ func WriteExample(path string) error {
 }
 
 func Load(path string) (Config, error) {
+	c, err := LoadGuard(path)
+	if err == nil && c.Mihomo.Secret == "" {
+		if live, readErr := ReadCoreFile(c.Mihomo.ConfigPath); readErr == nil {
+			c.Mihomo.Secret = live.Secret
+		}
+	}
+	return c, err
+}
+
+// LoadGuard reads the guard YAML, applies defaults and resolves paths relative
+// to that file. Offline commands can use it without opening the core config.
+func LoadGuard(path string) (Config, error) {
 	var c Config
 	if err := yaml.UnmarshalStrict(example, &c); err != nil {
 		return c, err
@@ -94,15 +106,7 @@ func Load(path string) (Config, error) {
 			return c, err
 		}
 	}
-	if err = c.validate(); err != nil {
-		return c, err
-	}
-	if c.Mihomo.Secret == "" {
-		if live, readErr := ReadCoreFile(c.Mihomo.ConfigPath); readErr == nil {
-			c.Mihomo.Secret = live.Secret
-		}
-	}
-	return c, nil
+	return c, c.validate()
 }
 
 func (c Config) validate() error {

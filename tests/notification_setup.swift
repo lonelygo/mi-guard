@@ -4,16 +4,25 @@ import UserNotifications
 private struct NotificationSetupTests {
     @MainActor
     static func main() async throws {
-        for args in [[], ["-psn_0_12345"]] {
+        for args in [[], ["-psn_0_12345"], ["--dashboard"]] {
             let mode = try HelperMode(arguments: args)
-            precondition(mode == .authorize(finder: true))
+            precondition(mode == .dashboard(config: nil))
         }
+        let customDashboard = try HelperMode(arguments: ["--dashboard", "-c", "/tmp/example.yaml"])
+        precondition(customDashboard == .dashboard(config: "/tmp/example.yaml"))
         let explicit = try HelperMode(arguments: ["--authorize"])
         let check = try HelperMode(arguments: ["--check"])
         let launchedCheck = try HelperMode(arguments: ["-psn_0_12345", "--check"])
         let send = try HelperMode(arguments: ["--send", "--kind", "switch", "--title", "title", "--body", "body"])
-        precondition(explicit == .authorize(finder: false) && check == .check && launchedCheck == .check)
+        precondition(explicit == .authorize && check == .check && launchedCheck == .check)
         precondition(send == .send(kind: "switch", title: "title", body: "body"))
+        let source = "/tmp/guard config/guard.yaml"
+        let click = UNNotificationDefaultActionIdentifier
+        let switchClick = DashboardDestination(action: click, thread: "mi-guard.switch", userInfo: ["guardConfigPath": source])
+        precondition(switchClick?.section == .selections && switchClick?.configURL?.path == source)
+        let summaryClick = DashboardDestination(action: click, thread: "mi-guard.summary", userInfo: [:])
+        precondition(summaryClick?.section == .overview && summaryClick?.configURL == nil)
+        precondition(DashboardDestination(action: UNNotificationDismissActionIdentifier, thread: "mi-guard.switch", userInfo: [:]) == nil)
 
         var requests = 0
         let result = try await authorizeIfNeeded(settings: { .notDetermined }) {

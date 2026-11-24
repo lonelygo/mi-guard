@@ -35,6 +35,7 @@ const usage = `mihomo-guard <command> [-c guard.yaml]
   init          Write a new guard configuration
   check         Verify wiring and show live availability, current member, latency, bandwidth and tenure
   status        Show current groups and accounted usage (--probe for fresh checks)
+  history       Print a read-only JSON snapshot of recorded usage, samples and group selections
   bench         Measure managed groups, or use -g GROUP, --node NAME, -f REGEXP
                 --source FILE|URL measures an ad-hoc provider using the installed core
                 --apply selects or keeps a measured member of a manual selector
@@ -167,7 +168,7 @@ func run(ctx context.Context, args []string) error {
 		fs.BoolVar(&opt.apply, "apply", false, "select or keep the best eligible member; automatic groups are measured only")
 	case "status":
 		fs.BoolVar(&live, "probe", false, "also probe managed live-path liveness and configured geography")
-	case "init", "check", "daemon", "notify-setup":
+	case "init", "check", "history", "daemon", "notify-setup":
 	default:
 		return fmt.Errorf("unknown command %q\n%s", cmd, usage)
 	}
@@ -188,6 +189,9 @@ func run(ctx context.Context, args []string) error {
 		}
 		fmt.Println(path)
 		return nil
+	}
+	if cmd == "history" {
+		return writeDashboardHistory(os.Stdout, path)
 	}
 	c, err := config.Load(path)
 	if err != nil {
@@ -216,7 +220,7 @@ func run(ctx context.Context, args []string) error {
 		defer stop()
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	sender := notify.New(c.Notifications, log)
+	sender := notify.New(c.Notifications, path, log)
 	defer sender.Close()
 	r := &guard.Runner{Cfg: c, Core: mihomo.New(c.Mihomo.Controller, c.Mihomo.Secret), Store: history.New(c.History.File, c.History.SamplesPerNode, c.Speed.BillingDay), Notify: sender.Send, Log: log}
 	if cmd == "status" {

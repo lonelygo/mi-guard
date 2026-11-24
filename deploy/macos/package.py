@@ -114,9 +114,13 @@ def main() -> int:
         plist = app / "Contents/Info.plist"
         verify_binary(cli, args.deployment_target, repo)
         verify_binary(helper, args.deployment_target, repo)
+        reader = app / "Contents/Helpers/mihomo-guard"
+        verify_binary(reader, args.deployment_target, repo)
         cli_version = output(str(cli), "--version", cwd=repo).strip()
         if cli_version != f"mihomo-guard {args.version}":
             raise RuntimeError(f"unexpected packaged CLI version: {cli_version}")
+        if output(str(reader), "--version", cwd=repo).strip() != cli_version:
+            raise RuntimeError("dashboard history reader version does not match the packaged CLI")
         for key, expected in (
             ("CFBundleShortVersionString", args.version),
             ("CFBundleVersion", args.version),

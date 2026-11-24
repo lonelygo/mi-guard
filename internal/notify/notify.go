@@ -27,9 +27,10 @@ const (
 )
 
 type Sender struct {
-	config config.Notifications
-	logger *slog.Logger
-	queue  chan message
+	config     config.Notifications
+	configPath string
+	logger     *slog.Logger
+	queue      chan message
 
 	mu     sync.Mutex
 	closed bool
@@ -44,15 +45,20 @@ type message struct {
 	body  string
 }
 
-func New(configuration config.Notifications, logger *slog.Logger) *Sender {
+func New(configuration config.Notifications, configPath string, logger *slog.Logger) *Sender {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if configPath != "" {
+		// Notification Center delivers the click after the sending process exits.
+		configPath, _ = filepath.Abs(configPath)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sender := &Sender{ctx: ctx, cancel: cancel,
-		config: configuration,
-		logger: logger,
-		queue:  make(chan message, queueCapacity),
+		config:     configuration,
+		configPath: configPath,
+		logger:     logger,
+		queue:      make(chan message, queueCapacity),
 	}
 	if configuration.Enabled {
 		sender.wg.Add(1)
@@ -168,6 +174,7 @@ func (s *Sender) deliver(item message) error {
 		"--title", item.title,
 		"--body", item.body,
 	)
+	command.Env = append(os.Environ(), "MI_GUARD_NOTIFICATION_CONFIG="+s.configPath)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {

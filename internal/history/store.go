@@ -145,11 +145,21 @@ func (s *Store) Snapshot(ctx context.Context) (Snapshot, error) {
 				return err
 			}
 		}
-		result = snapshotOf(state)
-		result.Selections, err = s.readSelections()
+		result, err = s.snapshotOf(state)
 		return err
 	})
 	return result, err
+}
+
+// ReadOnlySnapshot reads the last complete version of each atomically replaced
+// file. Missing state and billing rollover are resolved in memory, so even a
+// first dashboard read needs no directory, state file or lock.
+func (s *Store) ReadOnlySnapshot() (Snapshot, error) {
+	state, _, err := s.loadCurrent()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return s.snapshotOf(state)
 }
 
 // Record stores a non-budgeted observation. Heartbeats are aggregated by
@@ -322,6 +332,9 @@ func (s *Store) loadCurrent() (diskState, bool, error) {
 		state.Finalized = make(map[string]time.Time)
 		return state, true, nil
 	}
+	// JSON only stores an offset. Restore the billing clock's location so
+	// advancing a calendar month also observes any daylight-saving change.
+	state.CycleStart = start
 	return state, false, nil
 }
 
@@ -331,7 +344,7 @@ func (s *Store) load() (diskState, bool, error) {
 	return state, exists, err
 }
 
-func readHistoryJSON(path string, into any) (bool, error) {
+func readHistoryJSON[T any](path string, into *T) (bool, error) {
 	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -342,8 +355,11 @@ func readHistoryJSON(path string, into any) (bool, error) {
 	defer file.Close()
 	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(into); err != nil {
+	if err := decoder.Decode(&into); err != nil {
 		return false, fmt.Errorf("decode history: %w", err)
+	}
+	if into == nil {
+		return false, errors.New("decode history: expected an object, got null")
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
@@ -416,7 +432,7 @@ func (s *Store) lockPath(name string) string {
 	return s.file + "." + clean.String() + ".lock"
 }
 
-func snapshotOf(state diskState) Snapshot {
+func (s *Store) snapshotOf(state diskState) (Snapshot, error) {
 	pending := int64(0)
 	for _, item := range state.Reservations {
 		pending += item.Bytes
@@ -430,14 +446,16 @@ func snapshotOf(state diskState) Snapshot {
 	for i := range samples {
 		samples[i].Scope, samples[i].Profile = readDownloadScope(samples[i].Scope)
 	}
+	selections, err := s.readSelections()
 	return Snapshot{
 		Samples:      samples,
 		Heartbeats:   heartbeats,
+		Selections:   selections,
 		UsedBytes:    state.UsedBytes,
 		PendingBytes: pending,
 		CycleStart:   state.CycleStart,
 		LastSweep:    state.LastSweep,
-	}
+	}, err
 }
 
 // v0.1.x rejects unknown JSON fields. Qualifying the route in the same record

@@ -10,6 +10,25 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+func TestLoadGuardLeavesCoreSecretLookupToLiveCommands(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "core.yaml"), []byte("secret: core-only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "guard.yaml")
+	if err := os.WriteFile(path, []byte("mihomo: {config_path: core.yaml}\nhistory: {file: records/speed.json}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	offline, err := LoadGuard(path)
+	if err != nil || offline.Mihomo.Secret != "" || offline.History.File != filepath.Join(dir, "records", "speed.json") {
+		t.Fatalf("offline config: secret populated=%v, history=%q, err=%v", offline.Mihomo.Secret != "", offline.History.File, err)
+	}
+	live, err := Load(path)
+	if err != nil || live.Mihomo.Secret != "core-only" {
+		t.Fatalf("live config did not resolve the core secret: %v", err)
+	}
+}
+
 func TestInitAndDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "guard.yaml")
 	if err := WriteExample(path); err != nil {

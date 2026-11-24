@@ -22,7 +22,7 @@ func TestSenderFiltersAndDrainsEnabledKinds(t *testing.T) {
 		Summary: false,
 		Switch:  true,
 		Helper:  app,
-	}, logger)
+	}, "", logger)
 	sender.Send("summary", "hidden", "hidden")
 	sender.Send("switch", "US changed", "old to new")
 	sender.Close()
@@ -45,11 +45,28 @@ func TestSenderFiltersAndDrainsEnabledKinds(t *testing.T) {
 
 func TestDisabledSenderDoesNotRunHelper(t *testing.T) {
 	app, output := fakeApp(t)
-	sender := New(config.Notifications{Enabled: false, Summary: true, Switch: true, Helper: app}, nil)
+	sender := New(config.Notifications{Enabled: false, Summary: true, Switch: true, Helper: app}, "", nil)
 	sender.Send("switch", "title", "body")
 	sender.Close()
 	if _, err := os.Stat(output); !os.IsNotExist(err) {
 		t.Fatalf("disabled sender created output: %v", err)
+	}
+}
+
+func TestDeliveryIncludesAbsoluteDashboardConfigWithoutChangingHelperArguments(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "context")
+	app := fakeAppWithScript(t, "#!/bin/sh\nprintf '%s\\n' \"$MI_GUARD_NOTIFICATION_CONFIG\" \"$#\" > "+shellQuote(output)+"\n")
+	path := filepath.Join("example config", "guard.yaml")
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := New(config.Notifications{Enabled: true, Switch: true, Helper: app}, path, nil)
+	sender.Send("switch", "group", "node")
+	sender.Close()
+	data, err := os.ReadFile(output)
+	if err != nil || string(data) != absolute+"\n7\n" {
+		t.Fatalf("helper context %q, %v", data, err)
 	}
 }
 

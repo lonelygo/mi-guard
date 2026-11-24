@@ -9,8 +9,10 @@ BUILD_DIR ?= build
 MACOSX_DEPLOYMENT_TARGET ?= 12.0
 RELEASE_GO_TOOLCHAIN ?= go1.26.11
 SWIFT_FLAGS ?= -target $(shell uname -m)-apple-macos$(MACOSX_DEPLOYMENT_TARGET)
+APP_SWIFT := $(wildcard deploy/macos/*.swift)
+DASHBOARD_SWIFT := $(filter-out deploy/macos/Notify.swift,$(APP_SWIFT))
 
-.PHONY: build cli test test-macos-notify app macos install package smoke
+.PHONY: build cli test test-macos-notify test-macos-dashboard app macos install package smoke
 build: cli
 
 cli:
@@ -20,12 +22,20 @@ cli:
 test:
 	go test -race ./...
 	go vet ./...
-	@if [ "$$(uname -s)" = Darwin ]; then $(MAKE) test-macos-notify; fi
+	@if [ "$$(uname -s)" = Darwin ]; then $(MAKE) test-macos-notify test-macos-dashboard; fi
 
 test-macos-notify:
 	mkdir -p "$(BUILD_DIR)"
 	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) deploy/macos/NotificationSetup.swift tests/notification_setup.swift -o "$(BUILD_DIR)/notification-setup-tests"
 	"$(BUILD_DIR)/notification-setup-tests"
+
+test-macos-dashboard: cli
+	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) deploy/macos/DashboardData.swift tests/dashboard_data.swift -o "$(BUILD_DIR)/dashboard-data-tests"
+	"$(BUILD_DIR)/dashboard-data-tests"
+	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) deploy/macos/DashboardData.swift deploy/macos/DashboardMetrics.swift tests/dashboard_metrics.swift -o "$(BUILD_DIR)/dashboard-metrics-tests"
+	"$(BUILD_DIR)/dashboard-metrics-tests"
+	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) $(DASHBOARD_SWIFT) tests/dashboard_window.swift -o "$(BUILD_DIR)/dashboard-window-tests"
+	"$(BUILD_DIR)/dashboard-window-tests" "$(abspath $(BUILD_DIR)/mihomo-guard)"
 
 $(BUILD_DIR)/AppIcon.icns: deploy/macos/AppIcon.png
 	mkdir -p "$(BUILD_DIR)/AppIcon.iconset"
@@ -36,11 +46,13 @@ $(BUILD_DIR)/AppIcon.icns: deploy/macos/AppIcon.png
 	done
 	iconutil -c icns "$(BUILD_DIR)/AppIcon.iconset" -o "$@"
 
-app: $(BUILD_DIR)/AppIcon.icns
-	mkdir -p "$(BUILD_DIR)/mi-guard.app/Contents/MacOS" "$(BUILD_DIR)/mi-guard.app/Contents/Resources"
+app: cli $(BUILD_DIR)/AppIcon.icns
+	mkdir -p "$(BUILD_DIR)/mi-guard.app/Contents/MacOS" "$(BUILD_DIR)/mi-guard.app/Contents/Resources" "$(BUILD_DIR)/mi-guard.app/Contents/Helpers"
 	cp deploy/macos/Info.plist "$(BUILD_DIR)/mi-guard.app/Contents/Info.plist"
 	cp "$(BUILD_DIR)/AppIcon.icns" "$(BUILD_DIR)/mi-guard.app/Contents/Resources/AppIcon.icns"
-	xcrun swiftc -O $(SWIFT_FLAGS) deploy/macos/NotificationSetup.swift deploy/macos/Notify.swift -o "$(BUILD_DIR)/mi-guard.app/Contents/MacOS/mi-guard-notify"
+	cp "$(BUILD_DIR)/mihomo-guard" "$(BUILD_DIR)/mi-guard.app/Contents/Helpers/mihomo-guard"
+	codesign --force --sign - --timestamp=none "$(BUILD_DIR)/mi-guard.app/Contents/Helpers/mihomo-guard"
+	xcrun swiftc -O $(SWIFT_FLAGS) $(APP_SWIFT) -o "$(BUILD_DIR)/mi-guard.app/Contents/MacOS/mi-guard-notify"
 	/usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $(MACOSX_DEPLOYMENT_TARGET)" "$(BUILD_DIR)/mi-guard.app/Contents/Info.plist"
 ifneq ($(strip $(RELEASE_VERSION)),)
 	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(RELEASE_VERSION)" "$(BUILD_DIR)/mi-guard.app/Contents/Info.plist"

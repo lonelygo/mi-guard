@@ -9,16 +9,19 @@ struct HelperError: LocalizedError {
 
 enum HelperMode: Equatable {
     case check
-    case authorize(finder: Bool)
+    case dashboard(config: String?)
+    case authorize
     case send(kind: String, title: String, body: String)
 
     init(arguments raw: [String]) throws {
         // LaunchServices can prepend a legacy process serial number to the arguments.
         let arguments = raw.first?.hasPrefix("-psn_") == true ? Array(raw.dropFirst()) : raw
-        if arguments.isEmpty {
-            self = .authorize(finder: true)
+        if arguments.isEmpty || arguments == ["--dashboard"] {
+            self = .dashboard(config: nil)
+        } else if arguments.count == 3 && arguments[0] == "--dashboard" && ["-c", "--config"].contains(arguments[1]) && !arguments[2].isEmpty {
+            self = .dashboard(config: arguments[2])
         } else if arguments == ["--authorize"] {
-            self = .authorize(finder: false)
+            self = .authorize
         } else if arguments == ["--check"] {
             self = .check
         } else if arguments.first == "--send" {
@@ -30,7 +33,26 @@ enum HelperMode: Equatable {
             }
             self = try .send(kind: value("--kind"), title: value("--title"), body: value("--body"))
         } else {
-            throw HelperError("usage: mi-guard-notify --check | --authorize | --send --kind KIND --title TITLE --body BODY")
+            throw HelperError("usage: mi-guard-notify [--dashboard [-c guard.yaml]] | --check | --authorize | --send --kind KIND --title TITLE --body BODY")
+        }
+    }
+}
+
+enum DashboardSection: String, CaseIterable {
+    case overview, nodes, selections
+}
+
+struct DashboardDestination: Equatable {
+    let section: DashboardSection
+    let configURL: URL?
+
+    init?(action: String, thread: String, userInfo: [AnyHashable: Any]) {
+        guard action == UNNotificationDefaultActionIdentifier else { return nil }
+        section = thread == "mi-guard.switch" ? .selections : .overview
+        if let path = userInfo["guardConfigPath"] as? String, path.hasPrefix("/") {
+            configURL = URL(fileURLWithPath: path).standardizedFileURL
+        } else {
+            configURL = nil
         }
     }
 }

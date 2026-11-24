@@ -183,6 +183,52 @@ func TestMarkSweepPersistsCadenceWithoutSyntheticSample(t *testing.T) {
 	}
 }
 
+func TestReadOnlySnapshotUsesLocalBillingCalendarWithoutWritingRollover(t *testing.T) {
+	london, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := testStore(t, 5)
+	s.billingDay = 15
+	now := time.Date(2026, time.March, 20, 12, 0, 0, 0, london)
+	s.now = func() time.Time { return now }
+	state := newDiskState(cycleStart(now, s.billingDay))
+	state.UsedBytes = 17
+	state.Reservations["unfinished"] = diskReservation{Bytes: 5, CreatedAt: now}
+	state.LastSweep = now
+	state.Samples = []model.Sample{{At: now, Node: "node", Scope: "front", Kind: "bench", Mbps: 12, Bytes: 7}}
+	if err := s.write(state); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(s.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextCycle := time.Date(2026, time.April, 15, 0, 0, 0, 0, london)
+	current, err := s.ReadOnlySnapshot()
+	if err != nil || current.UsedBytes != 17 || current.PendingBytes != 5 || !current.CycleStart.AddDate(0, 1, 0).Equal(nextCycle) {
+		t.Fatalf("current cycle including DST change: %+v, %v", current, err)
+	}
+	now = nextCycle
+	rolled, err := s.ReadOnlySnapshot()
+	if err != nil || !rolled.CycleStart.Equal(nextCycle) || rolled.UsedBytes != 0 || rolled.PendingBytes != 0 ||
+		!rolled.LastSweep.Equal(state.LastSweep) || len(rolled.Samples) != 1 {
+		t.Fatalf("new cycle: %+v, %v", rolled, err)
+	}
+	after, err := os.Stat(s.file)
+	if err != nil || !os.SameFile(before, after) || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("read replaced or modified the ledger: %v", err)
+	}
+	persisted, _, err := s.load()
+	if err != nil || !persisted.CycleStart.Equal(state.CycleStart) || persisted.UsedBytes != 17 || persisted.Previous != nil {
+		t.Fatalf("rollover was persisted: %+v, %v", persisted, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(s.file))
+	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(s.file) {
+		t.Fatalf("unexpected sidecar or lock: %v, %v", entries, err)
+	}
+}
+
 func TestBillingCycleRolloverSettlesOriginalCycleWithoutTouchingNewBudget(t *testing.T) {
 	store := testStore(t, 5)
 	now := time.Date(2026, time.January, 20, 9, 0, 0, 0, time.Local)
@@ -262,6 +308,9 @@ func TestDamagedCurrentCycleBudgetFailsClosed(t *testing.T) {
 			}
 			if _, err := store.Snapshot(context.Background()); err == nil {
 				t.Fatal("damaged budget was accepted")
+			}
+			if _, err := store.ReadOnlySnapshot(); err == nil {
+				t.Fatal("dashboard accepted a damaged budget")
 			}
 			after, err := os.ReadFile(store.file)
 			if err != nil {
