@@ -11,8 +11,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -201,6 +203,20 @@ func TestCheckRouteSendsNoHTTPRequest(t *testing.T) {
 	})
 	if err != nil || !checked || originHits.Load() != 0 {
 		t.Fatalf("checked=%t err=%v origin hits=%d", checked, err, originHits.Load())
+	}
+}
+
+func TestCheckRouteIdentifiesRefusedListener(t *testing.T) {
+	listener := httptest.NewServer(nil)
+	listener.Close()
+	for _, proxy := range []string{listener.URL, ""} {
+		err := CheckRoute(context.Background(), proxy, listener.URL, time.Second, nil)
+		if !errors.Is(err, syscall.ECONNREFUSED) {
+			t.Fatalf("proxy %q: want connection refused, got %v", proxy, err)
+		}
+		if strings.Contains(err.Error(), "listener startup or reload log") != (proxy != "") {
+			t.Errorf("wrong diagnostic for proxy %q: %v", proxy, err)
+		}
 	}
 }
 

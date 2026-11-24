@@ -1,129 +1,105 @@
 import AppKit
-import Foundation
 import UserNotifications
 
-private let expectedBundleIdentifier = "com.lonelygo.mi-guard.notify"
-private let center = UNUserNotificationCenter.current()
-private let callbackTimeout: TimeInterval = 8
+private let bundleID = "com.lonelygo.mi-guard.notify"
 
-private enum HelperError: Error, CustomStringConvertible {
-    case usage(String)
-    case bundle(String)
-    case authorization(String)
-    case delivery(String)
+private func writeOutput(_ message: String) {
+    FileHandle.standardOutput.write(Data("\(message)\n".utf8))
+}
 
-    var description: String {
-        switch self {
-        case .usage(let message), .bundle(let message), .authorization(let message), .delivery(let message):
-            return message
+private func writeError(_ message: String) {
+    FileHandle.standardError.write(Data("mi-guard-notify: \(message)\n".utf8))
+}
+
+@MainActor
+private func showStatus(_ message: String) {
+    NSApplication.shared.activate(ignoringOtherApps: true)
+    let alert = NSAlert()
+    alert.messageText = "mi-guard notifications"
+    alert.informativeText = message
+    alert.runModal()
+}
+
+@main
+@MainActor
+private struct NotificationHelper {
+    static func main() {
+        let mode: HelperMode
+        do {
+            mode = try HelperMode(arguments: Array(CommandLine.arguments.dropFirst()))
+        } catch {
+            writeError(error.localizedDescription)
+            exit(EXIT_FAILURE)
         }
-    }
-}
 
-private func argumentValue(_ name: String, in arguments: [String]) throws -> String {
-    guard let index = arguments.firstIndex(of: name), index + 1 < arguments.count else {
-        throw HelperError.usage("missing \(name)")
-    }
-    return arguments[index + 1]
-}
-
-private func waitForCallback(timeout: DispatchTime = .now() + callbackTimeout, _ start: (@escaping (Error?) -> Void) -> Void) throws {
-    let semaphore = DispatchSemaphore(value: 0)
-    var callbackError: Error?
-    start { error in
-        callbackError = error
-        semaphore.signal()
-    }
-    if semaphore.wait(timeout: timeout) == .timedOut {
-        throw HelperError.delivery("notification center timed out")
-    }
-    if let callbackError {
-        throw callbackError
-    }
-}
-
-private func checkBundle() throws {
-    guard Bundle.main.bundleIdentifier == expectedBundleIdentifier else {
-        throw HelperError.bundle("unexpected bundle identifier: \(Bundle.main.bundleIdentifier ?? "none")")
-    }
-    var authorization = "unknown"
-    try waitForCallback { complete in
-        center.getNotificationSettings { settings in
-            switch settings.authorizationStatus {
-            case .notDetermined: authorization = "notDetermined"
-            case .denied: authorization = "denied"
-            case .authorized: authorization = "authorized"
-            case .provisional: authorization = "provisional"
-            default: break
-            }
-            complete(nil)
-        }
-    }
-    print("{\"bundle_id\":\"\(expectedBundleIdentifier)\",\"user_notifications\":true,\"authorization\":\"\(authorization)\"}")
-}
-
-private func authorize() throws {
-    try waitForCallback(timeout: .distantFuture) { complete in
-        center.requestAuthorization(options: [.alert, .sound]) { granted, error in
-            if let error {
-                complete(error)
-            } else if !granted {
-                complete(HelperError.authorization("notification permission was not granted"))
-            } else {
-                complete(nil)
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        switch mode {
+        case .authorize:
+            break // The user may leave the permission prompt open.
+        case .check, .send:
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(8)) {
+                writeError("Notification Center timed out.")
+                exit(EXIT_FAILURE)
             }
         }
-    }
-}
 
-private func send(arguments: [String]) throws {
-    let kind = try argumentValue("--kind", in: arguments)
-    let title = try argumentValue("--title", in: arguments)
-    let body = try argumentValue("--body", in: arguments)
-
-    let settingsSemaphore = DispatchSemaphore(value: 0)
-    var allowed = false
-    center.getNotificationSettings { settings in
-        switch settings.authorizationStatus {
-        case .authorized, .provisional, .ephemeral:
-            allowed = true
-        default:
-            allowed = false
+        // Keep AppKit processing events while UserNotifications awaits the user's choice.
+        Task { @MainActor in
+            let feedback: String?
+            do {
+                guard Bundle.main.bundleIdentifier == bundleID else {
+                    throw HelperError("unexpected bundle identifier: \(Bundle.main.bundleIdentifier ?? "none")")
+                }
+                feedback = try await perform(mode, center: .current())
+            } catch {
+                writeError(error.localizedDescription)
+                if mode == .authorize(finder: true) { showStatus(error.localizedDescription) }
+                exit(EXIT_FAILURE)
+            }
+            if let feedback { showStatus(feedback) }
+            exit(EXIT_SUCCESS)
         }
-        settingsSemaphore.signal()
-    }
-    if settingsSemaphore.wait(timeout: .now() + callbackTimeout) == .timedOut {
-        throw HelperError.delivery("notification settings timed out")
-    }
-    guard allowed else {
-        throw HelperError.authorization("notification permission is unavailable; run notify-setup")
+        app.run()
+        writeError("application event loop stopped unexpectedly")
+        exit(EXIT_FAILURE)
     }
 
-    let content = UNMutableNotificationContent()
-    content.title = title
-    content.body = body
-    content.threadIdentifier = "mi-guard.\(kind)"
-    content.sound = .default
-    let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-    try waitForCallback { complete in
-        center.add(request, withCompletionHandler: complete)
+    // Return feedback only for a Finder launch which did not show a new permission prompt.
+    private static func perform(_ mode: HelperMode, center: UNUserNotificationCenter) async throws -> String? {
+        func settings() async -> UNAuthorizationStatus {
+            await center.notificationSettings().authorizationStatus
+        }
+        switch mode {
+        case .check:
+            let status = await settings()
+            writeOutput("{\"bundle_id\":\"\(bundleID)\",\"user_notifications\":true,\"authorization\":\"\(status.statusName)\"}")
+        case .authorize(let finder):
+            let result = try await authorizeIfNeeded(settings: settings) {
+                if !finder { writeOutput("Waiting for your choice in the macOS notification prompt for mi-guard.") }
+                return try await center.requestAuthorization(options: [.alert, .sound])
+            }
+            switch result {
+            case .granted:
+                writeOutput("Notification permission granted.")
+            case .alreadyAllowed(let status):
+                let message = "Notification permission: \(status.statusName)."
+                writeOutput(message)
+                if finder { return message }
+            }
+        case .send(let kind, let title, let body):
+            let status = await settings()
+            guard status.allowsDelivery else {
+                if status == .denied { throw HelperError(deniedMessage) }
+                throw HelperError("Notification permission: \(status.statusName). Run mihomo-guard notify-setup.")
+            }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.threadIdentifier = "mi-guard.\(kind)"
+            content.sound = .default
+            try await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+        }
+        return nil
     }
-}
-
-NSApplication.shared.setActivationPolicy(.accessory)
-
-do {
-    let arguments = Array(CommandLine.arguments.dropFirst())
-    if arguments == ["--check"] {
-        try checkBundle()
-    } else if arguments == ["--authorize"] {
-        try authorize()
-    } else if arguments.first == "--send" {
-        try send(arguments: arguments)
-    } else {
-        throw HelperError.usage("usage: mi-guard-notify --check | --authorize | --send --kind KIND --title TITLE --body BODY")
-    }
-} catch {
-    FileHandle.standardError.write(Data("mi-guard-notify: \(error)\n".utf8))
-    exit(EXIT_FAILURE)
 }

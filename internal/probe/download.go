@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/lonelygo/mi-guard/internal/model"
@@ -112,6 +113,9 @@ func CheckRoute(ctx context.Context, proxyURL, targetURL string, timeout time.Du
 	defer cancel()
 	connection, err := openTunnel(requestContext, proxyURL, target)
 	if err != nil {
+		if proxyURL != "" && errors.Is(err, syscall.ECONNREFUSED) {
+			return fmt.Errorf("open route-check tunnel: %w (check Mihomo's listener startup or reload log for a bind error)", err)
+		}
 		return fmt.Errorf("open route-check tunnel: %w", err)
 	}
 	defer connection.Close()

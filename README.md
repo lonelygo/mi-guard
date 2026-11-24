@@ -54,7 +54,9 @@ mihomo-guard check
 
 `check` 核对生效的监听绑定、纳管组、链式前置引用和测速路径。`status` 显示当前组选择、账期用量及样本数，`status --probe` 还会检查实际链路或选择组，并显示已启用的地区校验结果。
 
-地区监听报 `connection refused` 时，核对运行中 Mihomo 实际加载的监听地址和端口。`GET /connections` 超时表示 guard 在本轮时限内未能通过控制器的连接表确认测速路径，相关时限由 `speedtest.timeout` 设置。`bench` 表格中的 `204 probe: HTTP 504` 表示节点健康检查超时，该节点本轮跳过下载。
+地区监听报 `connection refused` 时，先看 **Mihomo 内核启动或重载时的日志**。YAML 中存在 `listeners` 条目，只说明配置声明了这个端口。如果日志显示 `bind: address already in use`，说明当时端口已被占用，Mihomo 创建监听失败。解决占用后重新加载配置，再运行 `mihomo-guard check`。如果改用空闲端口，同时更新 Mihomo 的 `listeners[].port` 和对应 guard 组的 `geo_proxy`。
+
+`GET /connections` 超时表示 guard 在本轮时限内未能通过控制器的连接表确认测速路径，相关时限由 `speedtest.timeout` 设置。`bench` 表格中的 `204 probe: HTTP 504` 表示节点健康检查超时，该节点本轮跳过下载。
 
 ### 增加链或只管理一个手动选择组
 
@@ -117,10 +119,17 @@ mihomo-guard bench -g primary-group-1 --apply
 
 ## 登录时运行与系统通知
 
-接线检查通过后，以当前登录用户执行以下命令。首次运行 `notify-setup` 时，在 macOS 的提示中允许通知。
+初始化 guard 配置后，在当前 macOS 桌面会话运行 `mihomo-guard notify-setup`，即可单独申请通知权限。`check` 用于验证 Mihomo 接线，通知授权可以在接线完成前进行。首次请求时，macOS 会显示 mi-guard 的通知提示。如果系统已记录拒绝，可在「系统设置 → 通知 → mi-guard」打开「允许通知」。
 
 ```sh
 mihomo-guard notify-setup
+```
+
+本版也可以通过 Finder 打开 `mi-guard.app` 进入通知设置。已安装 v0.1.2 的用户请使用上面的命令。后台守护使用已授予的权限发送通知。
+
+接线检查通过后，启用登录服务。
+
+```sh
 brew services start lonelygo/mi-guard/mi-guard
 brew services info lonelygo/mi-guard/mi-guard
 ```

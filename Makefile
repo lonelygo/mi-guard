@@ -10,7 +10,7 @@ MACOSX_DEPLOYMENT_TARGET ?= 12.0
 RELEASE_GO_TOOLCHAIN ?= go1.26.11
 SWIFT_FLAGS ?= -target $(shell uname -m)-apple-macos$(MACOSX_DEPLOYMENT_TARGET)
 
-.PHONY: build cli test app macos install package smoke
+.PHONY: build cli test test-macos-notify app macos install package smoke
 build: cli
 
 cli:
@@ -20,6 +20,12 @@ cli:
 test:
 	go test -race ./...
 	go vet ./...
+	@if [ "$$(uname -s)" = Darwin ]; then $(MAKE) test-macos-notify; fi
+
+test-macos-notify:
+	mkdir -p "$(BUILD_DIR)"
+	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) deploy/macos/NotificationSetup.swift tests/notification_setup.swift -o "$(BUILD_DIR)/notification-setup-tests"
+	"$(BUILD_DIR)/notification-setup-tests"
 
 $(BUILD_DIR)/AppIcon.icns: deploy/macos/AppIcon.png
 	mkdir -p "$(BUILD_DIR)/AppIcon.iconset"
@@ -34,7 +40,7 @@ app: $(BUILD_DIR)/AppIcon.icns
 	mkdir -p "$(BUILD_DIR)/mi-guard.app/Contents/MacOS" "$(BUILD_DIR)/mi-guard.app/Contents/Resources"
 	cp deploy/macos/Info.plist "$(BUILD_DIR)/mi-guard.app/Contents/Info.plist"
 	cp "$(BUILD_DIR)/AppIcon.icns" "$(BUILD_DIR)/mi-guard.app/Contents/Resources/AppIcon.icns"
-	xcrun swiftc -O $(SWIFT_FLAGS) deploy/macos/Notify.swift -o "$(BUILD_DIR)/mi-guard.app/Contents/MacOS/mi-guard-notify"
+	xcrun swiftc -O $(SWIFT_FLAGS) deploy/macos/NotificationSetup.swift deploy/macos/Notify.swift -o "$(BUILD_DIR)/mi-guard.app/Contents/MacOS/mi-guard-notify"
 	/usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $(MACOSX_DEPLOYMENT_TARGET)" "$(BUILD_DIR)/mi-guard.app/Contents/Info.plist"
 ifneq ($(strip $(RELEASE_VERSION)),)
 	/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(RELEASE_VERSION)" "$(BUILD_DIR)/mi-guard.app/Contents/Info.plist"

@@ -3,9 +3,11 @@
 package notify
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -103,13 +105,24 @@ func Authorize(ctx context.Context, helper string) error {
 	if err != nil {
 		return err
 	}
+	return runAuthorizationCommand(ctx, executable, os.Stdout)
+}
+
+func runAuthorizationCommand(ctx context.Context, executable string, stdout io.Writer) error {
 	command := exec.CommandContext(ctx, executable, "--authorize")
-	output, err := command.CombinedOutput()
+	var diagnostics bytes.Buffer
+	command.Stdout = stdout
+	command.Stderr = &diagnostics
+	err := command.Run()
 	if err != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("authorize notifications: %w: %s", err, strings.TrimSpace(string(output)))
+		detail := strings.TrimSpace(diagnostics.String())
+		if detail == "" {
+			return fmt.Errorf("authorize notifications: %w", err)
+		}
+		return fmt.Errorf("authorize notifications: %w: %s", err, detail)
 	}
 	return nil
 }

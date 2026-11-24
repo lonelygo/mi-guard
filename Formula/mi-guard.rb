@@ -64,9 +64,11 @@ class MiGuard < Formula
       active Mihomo configuration, then reload Mihomo.
         #{opt_pkgshare}/mihomo-overlay.yaml
 
-      Check the routing and grant notification permission in your login session.
-        mihomo-guard check
+      Request notification permission in your desktop login session.
         mihomo-guard notify-setup
+
+      Verify that the running Mihomo core has loaded your listeners.
+        mihomo-guard check
 
       Start the service as your login user. Logs go to ~/Library/Logs/mihomo-guard.log.
     EOS

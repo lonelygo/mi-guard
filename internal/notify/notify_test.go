@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"log/slog"
@@ -65,6 +66,57 @@ func TestAuthorizeUsesExplicitHelperMode(t *testing.T) {
 	}
 	if strings.TrimSpace(string(contents)) != "--authorize" {
 		t.Fatalf("authorize arguments = %q", contents)
+	}
+}
+
+func TestAuthorizeIncludesHelperDiagnostic(t *testing.T) {
+	app := fakeAppWithScript(t, "#!/bin/sh\nprintf '%s\\n' 'notification permission is denied' >&2\nexit 4\n")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := Authorize(ctx, app)
+	if err == nil || !strings.Contains(err.Error(), "notification permission is denied") {
+		t.Fatalf("authorize error = %v", err)
+	}
+}
+
+func TestAuthorizationNoticeStreamsBeforeHelperExit(t *testing.T) {
+	app := fakeAppWithScript(t, "#!/bin/sh\nprintf '%s\\n' 'Waiting for notification permission in the macOS system prompt...'\nexec sleep 10\n")
+	executable, err := resolveHelperPath(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, write := io.Pipe()
+	defer read.Close()
+	defer write.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- runAuthorizationCommand(ctx, executable, write)
+	}()
+
+	line := make(chan string, 1)
+	go func() {
+		value, _ := bufio.NewReader(read).ReadString('\n')
+		line <- value
+	}()
+	select {
+	case got := <-line:
+		if !strings.Contains(got, "Waiting for notification permission") {
+			t.Fatalf("authorization notice = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authorization notice was not streamed while helper was running")
+	}
+
+	cancel()
+	select {
+	case err := <-result:
+		if err != context.Canceled {
+			t.Fatalf("authorization cancellation = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authorization helper did not stop after cancellation")
 	}
 }
 
@@ -161,17 +213,22 @@ func TestResolveHelperLegacyGeneratedDefaultFallsBackOnlyWhenMissing(t *testing.
 
 func fakeApp(t *testing.T) (string, string) {
 	t.Helper()
+	output := filepath.Join(t.TempDir(), "arguments.txt")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(output) + "\n"
+	return fakeAppWithScript(t, script), output
+}
+
+func fakeAppWithScript(t *testing.T, script string) string {
+	t.Helper()
 	root := filepath.Join(t.TempDir(), "mi-guard.app")
 	executable := filepath.Join(root, "Contents", "MacOS", helperExecutable)
 	if err := os.MkdirAll(filepath.Dir(executable), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	output := filepath.Join(t.TempDir(), "arguments.txt")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(output) + "\n"
 	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return root, output
+	return root
 }
 
 func writeExecutable(t *testing.T, path string) {
