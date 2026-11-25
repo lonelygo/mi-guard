@@ -67,6 +67,25 @@ def write_archive(root: Path, destination: Path) -> None:
     os.replace(temporary, destination)
 
 
+def write_app_archive(app: Path, destination: Path) -> None:
+    # Finder and Homebrew both expect the signed .app at the ZIP root.
+    with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+        archive = Path(temporary) / destination.name
+        subprocess.run(["/usr/bin/ditto", "-c", "-k", "--norsrc", "--keepParent", app, archive], check=True)
+        unpacked = Path(temporary) / "unpacked"
+        subprocess.run(["/usr/bin/ditto", "-x", "-k", archive, unpacked], check=True)
+        bundle = unpacked / app.name
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", bundle], check=True)
+        os.replace(archive, destination)
+
+
+def write_checksum(archive: Path, destination: Path) -> None:
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    temporary = destination.with_name(destination.name + ".tmp")
+    temporary.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+    os.replace(temporary, destination)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
@@ -79,6 +98,7 @@ def main() -> int:
     release_dir.mkdir(parents=True, exist_ok=True)
     root_name = f"mi-guard-{args.version}-darwin-arm64"
     archive = release_dir / f"{root_name}.tar.gz"
+    app_archive = release_dir / f"mi-guard-app-{args.version}-darwin-arm64.zip"
 
     with tempfile.TemporaryDirectory(prefix=".mi-guard-package-", dir=release_dir) as temporary:
         scratch = Path(temporary)
@@ -131,14 +151,15 @@ def main() -> int:
                 raise RuntimeError(f"{key} is {actual}, expected {expected}")
         subprocess.run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)], check=True)
         write_archive(package_root, archive)
+        write_app_archive(app, app_archive)
 
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    sums = release_dir / "SHA256SUMS"
-    temporary_sums = release_dir / ".SHA256SUMS.tmp"
-    temporary_sums.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
-    os.replace(temporary_sums, sums)
-    print(f"created {archive.relative_to(repo)}")
-    print(f"created {sums.relative_to(repo)}")
+    for artifact, checksum in (
+        (archive, release_dir / "SHA256SUMS"),
+        (app_archive, app_archive.with_suffix(".zip.sha256")),
+    ):
+        write_checksum(artifact, checksum)
+        print(f"created {artifact.relative_to(repo)}")
+        print(f"created {checksum.relative_to(repo)}")
     return 0
 
 

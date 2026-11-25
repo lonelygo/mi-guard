@@ -33,6 +33,8 @@ jobs:
           name: release-files
           path: |
             build/release/*.tar.gz
+            build/release/*.zip
+            build/release/*.zip.sha256
             build/release/SHA256SUMS
           if-no-files-found: error
           compression-level: 0
@@ -64,29 +66,35 @@ jobs:
           git merge-base --is-ancestor "$tag_commit" HEAD
 
           archive="mi-guard-${TAG#v}-darwin-arm64.tar.gz"
+          app_zip="mi-guard-app-${TAG#v}-darwin-arm64.zip"
           (cd "$RUNNER_TEMP/release" && sha256sum "$archive" | cmp - SHA256SUMS)
+          (cd "$RUNNER_TEMP/release" && sha256sum "$app_zip" | cmp - "$app_zip.sha256")
           if ! draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
             gh release create "$TAG" --verify-tag --draft --title "mi-guard $TAG" --notes-from-tag
             draft=true
           fi
           if [[ "$draft" == true ]]; then
-            gh release upload "$TAG" "$RUNNER_TEMP/release/$archive" "$RUNNER_TEMP/release/SHA256SUMS" --clobber
+            gh release upload "$TAG" "$RUNNER_TEMP/release/$archive" "$RUNNER_TEMP/release/SHA256SUMS" \
+              "$RUNNER_TEMP/release/$app_zip" "$RUNNER_TEMP/release/$app_zip.sha256" --clobber
             gh release edit "$TAG" --draft=false
           fi
 
           # A retry uses the public asset, even if the new build has different bytes.
-          gh release download "$TAG" --pattern "$archive" --pattern SHA256SUMS --dir "$RUNNER_TEMP/published"
+          gh release download "$TAG" --pattern "$archive" --pattern SHA256SUMS \
+            --pattern "$app_zip" --pattern "$app_zip.sha256" --dir "$RUNNER_TEMP/published"
           cd "$RUNNER_TEMP/published"
           sha256sum "$archive" | cmp - SHA256SUMS
-      - name: Update the stable Homebrew formula
+          sha256sum "$app_zip" | cmp - "$app_zip.sha256"
+      - name: Update the stable Homebrew formula and cask
         run: |
           git pull --ff-only origin "$DEFAULT_BRANCH"
           digest=$(cut -d ' ' -f 1 "$RUNNER_TEMP/published/SHA256SUMS")
-          python3 deploy/homebrew/update_formula.py "${TAG#v}" "$digest"
-          if ! git diff --quiet -- Formula/mi-guard.rb; then
+          app_digest=$(cut -d ' ' -f 1 "$RUNNER_TEMP/published/mi-guard-app-${TAG#v}-darwin-arm64.zip.sha256")
+          python3 deploy/homebrew/update_formula.py "${TAG#v}" "$digest" "$app_digest"
+          if ! git diff --quiet -- Formula/mi-guard.rb Casks/mi-guard-app.rb; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add Formula/mi-guard.rb
+            git add Formula/mi-guard.rb Casks/mi-guard-app.rb
             git commit -m "Update Homebrew to $TAG"
             git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
           fi
@@ -107,3 +115,10 @@ jobs:
           test "$(basename "$(cd "$prefix" && pwd -P)")" = "${TAG#v}"
           brew test "$formula"
           brew services info "$formula"
+      - name: Install the dashboard from the public cask
+        run: |
+          brew install --cask lonelygo/mi-guard/mi-guard-app
+          app=/Applications/mi-guard.app
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "${TAG#v}"
+          test "$("$app/Contents/Helpers/mihomo-guard" --version)" = "mihomo-guard ${TAG#v}"
+          codesign --verify --deep --strict "$app"

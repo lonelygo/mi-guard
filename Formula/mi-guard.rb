@@ -71,6 +71,14 @@ class MiGuard < Formula
         mihomo-guard check
 
       Start the service as your login user. Logs go to ~/Library/Logs/mihomo-guard.log.
+        brew services start lonelygo/mi-guard/mi-guard
+
+      To install the dashboard in Applications, choose either option.
+        1. Homebrew
+           brew install --cask lonelygo/mi-guard/mi-guard-app
+        2. GitHub Releases
+           https://github.com/lonelygo/mi-guard/releases/download/v#{stable.version}/mi-guard-app-#{stable.version}-darwin-arm64.zip
+           Unzip the download and drag mi-guard.app into Applications.
     EOS
   end
 

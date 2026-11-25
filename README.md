@@ -16,6 +16,13 @@ mihomo-guard init    # 首次使用时创建配置，已有配置可直接沿用
 
 Homebrew 把 `mihomo-guard` 链接到自己的 `bin`，同一版本的通知助手随包安装在 `$(brew --prefix mi-guard)/libexec/mi-guard.app`。默认的 `notifications.helper: auto` 会找到这个助手。已有 `make install` 安装的用户请参考下文的迁移说明。
 
+要在 Finder 的「应用程序」中打开仪表盘，可以选择以下任一方式。已安装 CLI 的用户可以直接安装 App。
+
+- **Homebrew cask**。运行 `brew install --cask lonelygo/mi-guard/mi-guard-app`，Homebrew 默认将 App 安装到 `/Applications/mi-guard.app`。后续用 `brew upgrade --cask lonelygo/mi-guard/mi-guard-app` 更新。
+- **GitHub Release**。下载 `mi-guard-app-<版本>-darwin-arm64.zip`，双击解压，把 `mi-guard.app` 拖入「应用程序」。同页的 `.zip.sha256` 可用于校验下载。[下载 macOS App](https://github.com/lonelygo/mi-guard/releases/latest)
+
+当前 App 使用临时签名（ad hoc）。首次打开时若 macOS 提示无法验证开发者，可先核对发布页的 SHA-256，再按 Apple 的说明在「隐私与安全性」中确认打开。[Apple 的首次打开说明](https://support.apple.com/zh-cn/102445)
+
 用 `mihomo-guard -v` 或 `--version` 查看版本，用 `mihomo-guard -h` 或 `--help` 查看命令列表。运行 `mihomo-guard bench --help` 可查看测速参数。
 
 喜欢短命令可以在自己的 `~/.zshrc` 中加入 `alias mig=mihomo-guard`，打开新终端后即可使用 `mig bench --help`。macOS 的 `/usr/bin/mig` 是 Mach Interface Generator，启用别名后仍可用这个完整路径调用它。
@@ -146,7 +153,7 @@ daemon 的完整扫描、快筛和复测固定单流。以完整扫描为例，1
 
 ## macOS App（0.2.0）
 
-从 Finder 打开 `mi-guard.app`。Homebrew 安装后也可用 `open "$(brew --prefix mi-guard)/libexec/mi-guard.app"`。在「文件 → 打开配置…」中选择其他 guard YAML。点击扫描通知会进入概览，点击新版换线通知会打开该次决策，并使用发出通知时的配置。
+从 Finder 的「应用程序」打开 `mi-guard.app`。沿用 formula 随附的 App 时，可运行 `open "$(brew --prefix mi-guard)/libexec/mi-guard.app"`。在「文件 → 打开配置…」中选择其他 guard YAML。点击扫描通知会进入概览，点击新版换线通知会打开该次决策，并使用发出通知时的配置。
 
 - **概览**先显示纳管线路、最近观测到的节点和选用跨度，然后是账期测速额度、最近扫描和节点带宽趋势。
 - **节点分析**按节点和测法查看吞吐量、HTTP 204 延迟及单次结果。点击或拖动图上的测量点可查看数值。默认四流手测和单流守护各有记录，旧样本缺少的测法保留为未知。
@@ -223,7 +230,7 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.lonelygo.mi-g
 
 `make test` 运行 Go 竞态测试和静态检查。`make smoke` 通过本机稳定内核、临时控制器和回环测试服务器检查 CLI 的手动测速和切换。可用 `make smoke STABLE_CORE=/path/to/mihomo` 选择测试用核心。[现行设计](https://github.com/lonelygo/mi-guard/blob/main/mihomo_guard_mac.md) · [实施计划](https://github.com/lonelygo/mi-guard/blob/main/.omx/plans/implementation.md)
 
-维护者在 `main` 上推送带发布说明的 `vX.Y.Z` 标签后，GitHub Actions 会测试并打包、发布归档和校验文件、更新 tap，再从公开的 tap 安装并运行 `brew test`。[发布工作流](https://github.com/lonelygo/mi-guard/blob/main/.github/workflows/release.yml)
+维护者在 `main` 上推送带发布说明的 `vX.Y.Z` 标签后，GitHub Actions 会发布完整的 `.tar.gz`、独立 App ZIP 和各自的校验文件，再更新 tap 中的 formula 和 cask。工作流从公开 tap 安装 CLI 和 App，并检查版本和 App 签名。[发布工作流](https://github.com/lonelygo/mi-guard/blob/main/.github/workflows/release.yml)
 
 ## 致谢与许可证
 
