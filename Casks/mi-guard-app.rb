@@ -10,7 +10,7 @@ cask "mi-guard-app" do
   homepage "https://github.com/lonelygo/mi-guard"
 
   depends_on arch: :arm64
-  depends_on macos: ">= :monterey"
+  depends_on macos: :monterey
 
   app "mi-guard.app"
 end
