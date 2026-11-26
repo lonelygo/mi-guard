@@ -18,13 +18,13 @@ private enum DashboardMetricsTests {
         let failed = sample(4, error: "HTTP 504")
         let history = DashboardHistory(changes + [sample(3), failed, sample(0), old, old])
         let focus = history.selection(nil, matching: "")!
-        precondition(history.records.count == changes.count + 2 && history.routes.count == 4)
-        precondition(history.sampleCount == 12 && history.nodeCount == 3)
+        precondition(history.records.count == changes.count + 1 && history.routes.count == 4)
+        precondition(history.sampleCount == 10 && history.nodeCount == 3)
         precondition(history.records[focus] == [sample(0), sample(3), failed])
         precondition(history.selection(focus, matching: "osAkA")?.route.node == "Osaka")
         precondition(history.selection(focus, matching: "no-such-route") == nil)
-        let legacy = history.preferred.first { !$0.profile.isKnown }!
-        precondition(history.records[legacy]?.count == 2 && history.selection(legacy, matching: "") == legacy)
+        precondition(history.preferred.allSatisfy { $0.profile.isKnown })
+        precondition(DashboardHistory([old]).routes.isEmpty)
         let changed = DashboardHistory([sample(8, target: "two"), sample(9, node: "Seoul")])
         precondition(changed.selection(focus, matching: "")?.profile.target == "two")
         precondition(DashboardHistory([]).selection(focus, matching: "") == nil)
@@ -42,7 +42,8 @@ private enum DashboardMetricsTests {
         precondition(plot.segments.map { $0.map(\.mbps) } == [[3, 9], [7]])
         precondition(plot.failures == [at(4)] && plot.ceiling! >= 9)
         precondition(abs(plot.fraction(at: at(3)) - 0.01) < 1e-12)
-        let scattered = DashboardPlot(series: legacy, domain: domain, readings: readings)
+        let unscoped = DashboardHistory([sample(1, scope: "")]).preferred[0]
+        let scattered = DashboardPlot(series: unscoped, domain: domain, readings: readings)
         precondition(scattered.segments.map(\.count) == [1, 1, 1] && scattered.failures == plot.failures)
         let invalid = [sample(1, scope: ""), sample(1, kind: "unrecognized"), sample(1, streams: 9),
                        sample(1, request: 3), sample(1, target: "")]

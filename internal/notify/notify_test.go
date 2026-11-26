@@ -2,6 +2,7 @@ package notify
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -85,6 +86,18 @@ func TestDeliveryIncludesAbsoluteDashboardConfigWithoutChangingHelperArguments(t
 	data, err := os.ReadFile(output)
 	if err != nil || string(data) != absolute+"\n7\n" {
 		t.Fatalf("helper context %q, %v", data, err)
+	}
+}
+
+func TestSuccessfulDeliveryLogsHistoryDiagnostic(t *testing.T) {
+	app := fakeAppWithScript(t, "#!/bin/sh\nprintf '%s\n' 'notification delivered but history was not saved' >&2\n")
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	sender := New(config.Notifications{Enabled: true, Switch: true, Helper: app}, "", logger)
+	sender.Send("switch", "group", "node")
+	sender.Close()
+	if got := logs.String(); !strings.Contains(got, "history was not saved") {
+		t.Fatalf("delivery diagnostic was not logged: %q", got)
 	}
 }
 

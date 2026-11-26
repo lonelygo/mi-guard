@@ -35,6 +35,23 @@ private enum FlightMapTests {
         let midpoint = FlightProjection.quadraticPoint(0.5, start: arc.start, control: arc.control, end: arc.end)
         precondition(midpoint.x.isFinite && midpoint.y.isFinite)
         precondition(FlightProjection.point(for: invalidCoordinate(), in: size) == nil)
+        let tall = CGSize(width: 600, height: 600)
+        let tallRect = FlightProjection.mapRect(in: tall)
+        precondition(tallRect == CGRect(x: 0, y: 150, width: 600, height: 300))
+        let tallOrigin = FlightProjection.point(for: .init(latitude: 0, longitude: 0), in: tall)!
+        let tallEast = FlightProjection.point(for: .init(latitude: 0, longitude: 1), in: tall)!
+        let tallNorth = FlightProjection.point(for: .init(latitude: 1, longitude: 0), in: tall)!
+        precondition(abs((tallEast.x - tallOrigin.x) - (tallOrigin.y - tallNorth.y)) < 0.0001)
+        let wide = CGSize(width: 1_200, height: 400)
+        precondition(FlightProjection.mapRect(in: wide) == CGRect(x: 200, y: 0, width: 800, height: 400))
+        let acrossPacific = FlightCoordinate(latitude: 40, longitude: -100)
+        let visible = FlightProjection.visibleMidpoint(from: west, to: acrossPacific, in: wide)!
+        precondition(FlightProjection.mapRect(in: wide).contains(visible))
+        let reverse = FlightProjection.visibleMidpoint(from: acrossPacific, to: west, in: wide)!
+        precondition(abs(visible.x - reverse.x) < 0.001 && abs(visible.y - reverse.y) < 0.001)
+        let dotCloud = FlightLandDotCache.cloud(in: tall)
+        precondition(dotCloud.normalizedPoints.count > 500)
+        precondition(FlightLandDotCache.cloud(in: tall) === dotCloud)
 
         let calendar = fixedCalendar()
         let now = Date(timeIntervalSince1970: 2_000_000)

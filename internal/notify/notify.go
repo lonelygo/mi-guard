@@ -194,6 +194,10 @@ func (s *Sender) deliver(item message) error {
 		}
 		return fmt.Errorf("notification helper: %w: %s", err, strings.TrimSpace(string(output)))
 	}
+	if diagnostic := strings.TrimSpace(string(output)); diagnostic != "" {
+		s.logger.Warn("notification helper reported a diagnostic after delivery",
+			"kind", item.kind, "diagnostic", diagnostic)
+	}
 	return nil
 }
 

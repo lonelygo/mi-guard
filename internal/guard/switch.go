@@ -17,7 +17,14 @@ var ErrManualOverride = errors.New("proxy selection changed outside mihomo-guard
 
 // selectRanked runs under the apply lock. An unsuccessful trial rolls back
 // only while the selector still holds the last value written by this call.
-func (r *Runner) selectRanked(ctx context.Context, group config.Group, current model.Proxy, ranked []model.Sample, beforeFirstWrite func() error) (chosen model.Sample, reason string, err error) {
+func (r *Runner) selectRanked(
+	ctx context.Context,
+	group config.Group,
+	current model.Proxy,
+	ranked []model.Sample,
+	beforeFirstWrite func() error,
+	recordValidation func(string, string, bool),
+) (chosen model.Sample, reason string, err error) {
 	original := current.Now
 	owned := original
 	defer func() {
@@ -27,6 +34,11 @@ func (r *Runner) selectRanked(ctx context.Context, group config.Group, current m
 	}()
 
 	var failures []string
+	record := func(node, result string, online bool) {
+		if recordValidation != nil {
+			recordValidation(node, result, online)
+		}
+	}
 	// A false result with no error means the controller rejected this
 	// candidate and a fresh read confirmed our previous selection.
 	move := func(node string) (bool, error) {
@@ -82,6 +94,7 @@ func (r *Runner) selectRanked(ctx context.Context, group config.Group, current m
 	}
 	seen := make(map[string]bool, len(ranked))
 	var firstLive model.Sample
+	firstLiveRegion := ""
 	for _, result := range ranked {
 		node := result.Node
 		if seen[node] {
@@ -90,33 +103,40 @@ func (r *Runner) selectRanked(ctx context.Context, group config.Group, current m
 		seen[node] = true
 		if !contains(current.All, node) || node == r.Cfg.Mihomo.TestGroup || exclude != nil && exclude.MatchString(node) {
 			failures = append(failures, fmt.Sprintf("%s is not an eligible member of %s", node, group.Name))
+			record(node, "ineligible", false)
 			continue
 		}
 		if group.MinMbps > 0 && result.Mbps > 0 && result.Mbps < group.MinMbps {
 			failures = append(failures, fmt.Sprintf("%s below %.1f Mbps", node, group.MinMbps))
+			record(node, "belowMinimum", false)
 			continue
 		}
 		candidate, readErr := r.Core.Proxy(ctx, node)
 		if readErr != nil {
 			failures = append(failures, fmt.Sprintf("%s read: %v", node, readErr))
+			record(node, "proxyReadFailed", true)
 			continue
 		}
 		if !physical(candidate) || candidate.Dialer != "" && candidate.Dialer == r.Cfg.Mihomo.TestGroup {
 			failures = append(failures, fmt.Sprintf("%s is not a physical proxy eligible for selection", node))
+			record(node, "notPhysical", true)
 			continue
 		}
 		if node != original {
 			if _, delayErr := r.Core.Delay(ctx, node, r.Cfg.Speed.LivenessURL, r.Cfg.Schedule.HeartbeatTimeout); delayErr != nil {
 				failures = append(failures, fmt.Sprintf("%s unavailable", node))
+				record(node, "nodeUnavailable", true)
 				continue
 			}
 		}
 		if owned != node {
 			applied, err := move(node)
 			if err != nil {
+				record(node, "selectionFailed", true)
 				return chosen, "", err
 			}
 			if !applied {
+				record(node, "selectionRejected", true)
 				if node == original {
 					return chosen, "", fmt.Errorf("restore retained original: %s", strings.Join(failures, "; "))
 				}
@@ -125,6 +145,7 @@ func (r *Runner) selectRanked(ctx context.Context, group config.Group, current m
 		}
 		if _, pathErr := r.Core.Delay(ctx, group.ProbeTarget(), r.Cfg.Speed.LivenessURL, r.Cfg.Schedule.HeartbeatTimeout); pathErr != nil {
 			failures = append(failures, fmt.Sprintf("%s live path: %v", node, pathErr))
+			record(node, "routeUnavailable", true)
 			continue
 		}
 		if firstLive.Node == "" {
@@ -133,33 +154,62 @@ func (r *Runner) selectRanked(ctx context.Context, group config.Group, current m
 		if group.GeoProxy != "" {
 			geo, geoErr := r.checkGeo(ctx, group)
 			if errors.Is(geoErr, probe.ErrRoute) {
+				record(node, "routeProofFailed", true)
 				return chosen, "", fmt.Errorf("prove live geo route for %s: %w", model.QuoteName(group.Name), geoErr)
 			}
 			if !geo.OK {
 				failures = append(failures, fmt.Sprintf("%s geo: %s", node, geoFailure(geo, geoErr)))
+				validation := "regionMismatch"
+				if geoErr != nil {
+					validation = "regionProbeFailed"
+				}
+				record(node, validation, true)
+				if firstLive.Node == node {
+					firstLiveRegion = validation
+				}
 				continue
 			}
 			if geoErr != nil {
 				r.logWarn("exit telemetry failed after Google region passed", "group", group.Name, "node", node, "error", geoErr)
 			}
 		}
-		return result, "", r.verifySelection(ctx, group, node)
+		if verifyErr := r.verifySelection(ctx, group, node); verifyErr != nil {
+			record(node, "readbackFailed", true)
+			return chosen, "", verifyErr
+		}
+		record(node, "passed", true)
+		return result, "", nil
 	}
 
 	if !group.StrictGeo && firstLive.Node != "" {
 		if owned != firstLive.Node {
 			applied, err := move(firstLive.Node)
 			if err != nil {
+				record(firstLive.Node, "selectionFailed", true)
 				return chosen, "", err
 			}
 			if !applied {
+				record(firstLive.Node, "selectionRejected", true)
 				return chosen, "", fmt.Errorf("select live fallback: %s", strings.Join(failures, "; "))
 			}
 			if _, err := r.Core.Delay(ctx, group.ProbeTarget(), r.Cfg.Speed.LivenessURL, r.Cfg.Schedule.HeartbeatTimeout); err != nil {
+				record(firstLive.Node, "routeUnavailable", true)
 				return chosen, "", fmt.Errorf("verify fallback route for %s: %w", model.QuoteName(group.Name), err)
 			}
 		}
-		return firstLive, "Google 地区校验未通过，采用首个链路可用候选", r.verifySelection(ctx, group, firstLive.Node)
+		if verifyErr := r.verifySelection(ctx, group, firstLive.Node); verifyErr != nil {
+			record(firstLive.Node, "readbackFailed", true)
+			return chosen, "", verifyErr
+		}
+		validation, detail := "fallbackRegionUnknown", "地区结果未确认，按宽松策略采用首个链路可用候选"
+		switch firstLiveRegion {
+		case "regionMismatch":
+			validation, detail = "fallbackRegionMismatch", "出口地区不符，按宽松策略采用首个链路可用候选"
+		case "regionProbeFailed":
+			validation, detail = "fallbackRegionProbeFailed", "地区探测失败，按宽松策略采用首个链路可用候选"
+		}
+		record(firstLive.Node, validation, true)
+		return firstLive, detail, nil
 	}
 	return chosen, "", fmt.Errorf("no candidate passed validation: %s", strings.Join(failures, "; "))
 }

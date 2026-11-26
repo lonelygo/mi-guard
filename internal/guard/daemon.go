@@ -153,9 +153,11 @@ func (d *daemonRuntime) recoverHard(ctx context.Context, group config.Group, cur
 	ranked := policy.Rank(current, known, snapshot.Samples, 100)
 	ranked = withoutNode(append(ranked, unmeasured...), current)
 	for index := range ranked {
-		ranked[index].Kind = "recovery"
+		if ranked[index].Kind == "" {
+			ranked[index].Kind = "recovery"
+		}
 	}
-	selected, err := d.apply(ctx, group, current, ranked, ranked, snapshot.Samples)
+	selected, err := d.apply(ctx, group, current, ranked, ranked, snapshot.Samples, "hardFailure")
 	if err != nil {
 		return err
 	}
@@ -431,7 +433,7 @@ func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, ini
 	if !d.pendingMatches(group.Name, current, generation) {
 		return
 	}
-	selected, err := d.apply(ctx, group, current, ranked, confirmed, past)
+	selected, err := d.apply(ctx, group, current, ranked, confirmed, past, "")
 	if err != nil {
 		d.runner.logWarn("slow-path switch failed", "group", group.Name, "error", err)
 		return
@@ -601,11 +603,13 @@ func (d *daemonRuntime) candidates(ctx context.Context, group string) ([]string,
 	return d.runner.Candidates(ctx, group)
 }
 
-func (d *daemonRuntime) apply(ctx context.Context, group config.Group, expected string, ranked, evidence, past []model.Sample) (string, error) {
+func (d *daemonRuntime) apply(ctx context.Context, group config.Group, expected string, ranked, evidence, past []model.Sample, decisionTrigger string) (string, error) {
 	if d.applyFn != nil {
 		return d.applyFn(ctx, group, expected, ranked)
 	}
-	results, err := d.runner.applySelections(ctx, BenchTarget{Group: group, Current: expected, Evidence: evidence, History: past}, ranked, false)
+	results, err := d.runner.applySelections(ctx, BenchTarget{
+		Group: group, Current: expected, Evidence: evidence, History: past, DecisionTrigger: decisionTrigger,
+	}, ranked, false)
 	if len(results) == 0 {
 		return "", err
 	}

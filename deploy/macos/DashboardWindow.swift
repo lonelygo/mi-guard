@@ -10,19 +10,27 @@ final class DashboardController: ObservableObject {
     @Published private(set) var loading = false
     @Published private(set) var configURL: URL?
     @Published private(set) var requestedDecisionID: String?
+    @Published private(set) var notificationRecords: [NotificationRecord] = []
+    @Published private(set) var selectedNotificationID: String?
+    @Published private(set) var notificationProblem: String?
 
     let readerURL: URL
     private let preferences: UserDefaults
+    private let notificationInbox: NotificationInboxStore
+    private var transientNotifications: [NotificationRecord] = []
     private let configKey = "dashboard.guardConfigPath"
     private var process: Process?
 
     init(reader: URL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/mihomo-guard"),
-         preferences: UserDefaults = .standard) {
+         preferences: UserDefaults = .standard,
+         notificationInbox: NotificationInboxStore = NotificationInboxStore()) {
         self.readerURL = reader
         self.preferences = preferences
+        self.notificationInbox = notificationInbox
         if let path = preferences.string(forKey: configKey), path.hasPrefix("/") {
             configURL = URL(fileURLWithPath: path)
         }
+        refreshNotifications()
     }
 
     func chooseConfig() {
@@ -113,12 +121,76 @@ final class DashboardController: ObservableObject {
         requestedDecisionID = nil
         refresh()
     }
+
+    func refreshNotifications() {
+        do {
+            notificationRecords = mergedNotifications(try notificationInbox.records())
+            notificationProblem = nil
+        } catch {
+            notificationRecords = mergedNotifications([])
+            notificationProblem = error.localizedDescription
+        }
+    }
+
+    func observeNotification(_ record: NotificationRecord, select: Bool = false) {
+        transientNotifications.removeAll { $0.id == record.id }
+        transientNotifications.insert(record, at: 0)
+        if transientNotifications.count > NotificationInboxStore.retentionLimit {
+            transientNotifications.removeLast(transientNotifications.count - NotificationInboxStore.retentionLimit)
+        }
+        if select { selectedNotificationID = record.id }
+        refreshNotifications()
+        if select { section = .notifications }
+    }
+
+    func focusNotification(_ id: String) {
+        refreshNotifications()
+        selectedNotificationID = notificationRecords.contains { $0.id == id } ? id : nil
+        section = .notifications
+    }
+
+    func focusNotification(_ record: NotificationRecord) {
+        observeNotification(record, select: true)
+    }
+
+    func toggleNotification(_ id: String) {
+        selectedNotificationID = selectedNotificationID == id ? nil : id
+    }
+
+    func openNotificationDestination(_ record: NotificationRecord) {
+        if let path = record.configPath {
+            useConfig(URL(fileURLWithPath: path), remember: false)
+        }
+        if let decisionID = record.decisionID {
+            focusDecision(decisionID)
+        } else {
+            clearDecisionFocus()
+            section = .overview
+        }
+    }
+
+    private func mergedNotifications(_ persisted: [NotificationRecord]) -> [NotificationRecord] {
+        var byID = Dictionary(persisted.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for record in transientNotifications where byID[record.id] == nil {
+            byID[record.id] = record
+        }
+        let ordered = byID.values.sorted(by: NotificationRecord.newestFirst)
+        guard ordered.count > NotificationInboxStore.retentionLimit else { return ordered }
+        let newest = Array(ordered.prefix(NotificationInboxStore.retentionLimit))
+        guard let selectedNotificationID,
+              !newest.contains(where: { $0.id == selectedNotificationID }),
+              let selected = ordered.first(where: { $0.id == selectedNotificationID }) else {
+            return newest
+        }
+        return Array(newest.dropLast()) + [selected]
+    }
 }
 
 @MainActor
 final class DashboardWindow: NSObject {
     let controller: DashboardController
     let window: NSWindow
+    private(set) var settingsWindow: NSWindow?
 
     init(controller: DashboardController, restoreFrame: Bool = true) {
         self.controller = controller
@@ -128,29 +200,56 @@ final class DashboardWindow: NSObject {
         super.init()
         window.title = "mi-guard"
         window.isReleasedWhenClosed = false
-        window.contentViewController = NSHostingController(rootView: DashboardView(controller: controller))
+        window.contentViewController = NSHostingController(rootView: DashboardView(controller: controller) { [weak self] in
+            self?.showSettings(nil)
+        })
         window.setContentSize(NSSize(width: 1100, height: 730))
         window.contentMinSize = NSSize(width: 850, height: 565)
         window.center()
         if restoreFrame { window.setFrameAutosaveName("mi-guard-history") }
     }
 
-    func present(_ destination: DashboardDestination? = nil) {
+    func present(_ destination: DashboardDestination? = nil, notification: NotificationRecord? = nil) {
+        let refreshHistory: Bool
         if let destination {
-            controller.section = destination.section
-            if let url = destination.configURL { controller.useConfig(url, remember: false) }
-            if let id = destination.decisionID { controller.focusDecision(id) }
-            else { controller.clearDecisionFocus() }
+            if let id = destination.notificationID {
+                if let notification { controller.focusNotification(notification) }
+                else { controller.focusNotification(id) }
+                refreshHistory = false
+            } else {
+                if let url = destination.configURL { controller.useConfig(url, remember: false) }
+                controller.section = destination.section
+                if let id = destination.decisionID { controller.focusDecision(id) }
+                else { controller.clearDecisionFocus() }
+                refreshHistory = true
+            }
+        } else {
+            refreshHistory = true
         }
-        controller.refresh()
+        if refreshHistory { controller.refresh() }
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @objc func showSettings(_ sender: Any?) {
+        if settingsWindow == nil {
+            let settings = NSWindow(contentViewController: NSHostingController(rootView: DashboardSettingsView(controller: controller)))
+            settings.title = "mi-guard 设置"
+            settings.styleMask = [.titled, .closable]
+            settings.isReleasedWhenClosed = false
+            settings.center()
+            settingsWindow = settings
+        }
+        settingsWindow?.makeKeyAndOrderFront(nil)
+    }
+
     @objc func openConfig(_ sender: Any?) { controller.chooseConfig() }
     @objc func defaultConfig(_ sender: Any?) { controller.useConfig(nil, remember: true) }
-    @objc func refresh(_ sender: Any?) { controller.refresh() }
+    @objc func refresh(_ sender: Any?) {
+        if controller.section == .notifications { controller.refreshNotifications() }
+        else { controller.refresh() }
+    }
 
     func installMenus() {
         let menu = NSMenu()
@@ -163,6 +262,8 @@ final class DashboardWindow: NSObject {
         }
         let app = submenu("mi-guard")
         app.addItem(withTitle: "关于 mi-guard", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        app.addItem(.separator())
+        app.addItem(withTitle: "设置…", action: #selector(showSettings(_:)), keyEquivalent: ",").target = self
         app.addItem(.separator())
         app.addItem(withTitle: "隐藏 mi-guard", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         app.addItem(withTitle: "退出 mi-guard", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

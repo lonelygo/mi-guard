@@ -24,6 +24,9 @@ private struct NotificationSetupTests {
         precondition(switchClick?.section == .selections && switchClick?.configURL?.path == source && switchClick?.decisionID == "decision-1")
         let summaryClick = DashboardDestination(action: click, thread: "mi-guard.summary", userInfo: [:])
         precondition(summaryClick?.section == .overview && summaryClick?.configURL == nil && summaryClick?.decisionID == nil)
+        let inboxClick = DashboardDestination(action: click, thread: "mi-guard.switch",
+                                              userInfo: ["notificationID": "notification-1", "decisionID": "decision-1"])
+        precondition(inboxClick?.section == .notifications && inboxClick?.notificationID == "notification-1")
         precondition(DashboardDestination(action: UNNotificationDismissActionIdentifier, thread: "mi-guard.switch", userInfo: [:]) == nil)
 
         var requests = 0

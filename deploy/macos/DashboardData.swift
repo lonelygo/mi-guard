@@ -53,11 +53,11 @@ struct DecisionRecord: Decodable, Hashable, Identifiable, Sendable {
     var followResults: [DecisionFollower] { followers ?? [] }
 }
 
-struct DecisionCandidate: Decodable, Hashable, Identifiable, Sendable {
-    var id: String { "\(node)|\(kind ?? "")|\(target ?? "")" }
+struct DecisionCandidate: Decodable, Hashable, Sendable {
     let node: String
     let provider: String?
     let kind: String?
+    let observedAt: Date?
     let target: String?
     let mbps: Double?
     let latencyMS: Int?
@@ -76,6 +76,8 @@ struct DecisionCandidate: Decodable, Hashable, Identifiable, Sendable {
     let historyFailures: Int?
     let historySamples: Int?
     let historyP25Mbps: Double?
+    let validationOrder: Int?
+    let validation: String?
     let selected: Bool?
 }
 

@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -316,6 +317,8 @@ func (s *Store) loadCurrent() (diskState, bool, error) {
 	if err := validateState(state, s.billingDay); err != nil {
 		return diskState{}, false, err
 	}
+	var changed bool
+	state.Samples, changed = pruneLegacyDownloadSamples(state.Samples)
 	if state.CycleStart.After(start) {
 		return diskState{}, false, errors.New("history billing cycle is in the future")
 	}
@@ -335,7 +338,7 @@ func (s *Store) loadCurrent() (diskState, bool, error) {
 	// JSON only stores an offset. Restore the billing clock's location so
 	// advancing a calendar month also observes any daylight-saving change.
 	state.CycleStart = start
-	return state, false, nil
+	return state, changed, nil
 }
 
 func (s *Store) load() (diskState, bool, error) {
@@ -476,6 +479,20 @@ func readDownloadScope(scope string) (string, model.DownloadProfile) {
 		}
 	}
 	return scope, model.DownloadProfile{}
+}
+
+func pruneLegacyDownloadSamples(samples []model.Sample) ([]model.Sample, bool) {
+	count := len(samples)
+	samples = slices.DeleteFunc(samples, func(sample model.Sample) bool {
+		switch sample.Kind {
+		case "bench", "sweep", "quick", "confirm":
+			_, profile := readDownloadScope(sample.Scope)
+			return !profile.Known()
+		default:
+			return false
+		}
+	})
+	return samples, len(samples) != count
 }
 
 func newDiskState(start time.Time) diskState {

@@ -46,9 +46,13 @@ func TestDecisionJournalRoundTripIsIdempotentAndSeparateFromBudget(t *testing.T)
 		t.Fatal(err)
 	}
 	at := time.Date(2026, time.November, 24, 13, 5, 0, 123, time.FixedZone("CST", 8*60*60))
+	observedAt := at.UTC()
 	decision := Decision{
 		ID: "event-1", At: at, Source: "bench", Group: "US", Before: "a", After: "b", Action: "switched",
-		Candidates: []DecisionCandidate{{Node: "b", Mbps: 12, Selected: true}},
+		Candidates: []DecisionCandidate{{
+			Node: "b", Kind: "sweep", ObservedAt: &observedAt, Mbps: 12,
+			ValidationOrder: 1, Validation: "passed", Selected: true,
+		}},
 	}
 	if err := store.RecordDecision(context.Background(), decision); err != nil {
 		t.Fatal(err)

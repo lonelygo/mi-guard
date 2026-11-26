@@ -63,7 +63,7 @@ struct DashboardOverview: View {
                                     }
                                 }.frame(width: 45, height: 4).accessibilityHidden(true)
                             } else if !comparison.comparable {
-                                Text(row.series.profile.isKnown ? "\(row.series.profile.streams) 流" : "流数未知")
+                                Text("\(row.series.profile.streams) 流")
                                     .font(.caption).foregroundColor(.secondary)
                             }
                             Text(verbatim: row.sample.successful ? "\(DashboardFormat.number(row.sample.mbps)) Mbps" : "测速失败")

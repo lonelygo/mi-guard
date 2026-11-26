@@ -14,6 +14,7 @@ private func writeError(_ message: String) {
 @MainActor
 private final class GuardApplication: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     let mode: HelperMode
+    private let notificationInbox = NotificationInboxStore()
     private var dashboard: DashboardWindow?
     private var refreshTimer: Timer?
 
@@ -27,6 +28,19 @@ private final class GuardApplication: NSObject, NSApplicationDelegate, UNUserNot
             Task {
                 // Opening history always works, including when delivery is turned off.
                 let center = UNUserNotificationCenter.current()
+                do {
+                    let delivered = await center.deliveredNotifications()
+                    try notificationInbox.upsert(delivered.map { notification in
+                        NotificationRecord(
+                            requestIdentifier: notification.request.identifier,
+                            content: notification.request.content,
+                            deliveredAt: notification.date
+                        )
+                    })
+                    dashboard?.controller.refreshNotifications()
+                } catch {
+                    writeError("cannot import delivered notifications: \(error.localizedDescription)")
+                }
                 if await center.notificationSettings().authorizationStatus == .notDetermined {
                     do { _ = try await center.requestAuthorization(options: [.alert, .sound]) }
                     catch { writeError(error.localizedDescription) }
@@ -52,7 +66,8 @@ private final class GuardApplication: NSObject, NSApplicationDelegate, UNUserNot
         }
     }
 
-    private func present(config: URL? = nil, destination: DashboardDestination? = nil) {
+    private func present(config: URL? = nil, destination: DashboardDestination? = nil,
+                         notification: NotificationRecord? = nil) {
         if dashboard == nil {
             NSApp.setActivationPolicy(.regular)
             let window = DashboardWindow(controller: DashboardController())
@@ -61,12 +76,13 @@ private final class GuardApplication: NSObject, NSApplicationDelegate, UNUserNot
             refreshTimer = Timer.scheduledTimer(timeInterval: 60, target: self, selector: #selector(refreshVisibleWindow), userInfo: nil, repeats: true)
         }
         if let config { dashboard?.controller.useConfig(config, remember: false) }
-        dashboard?.present(destination)
+        dashboard?.present(destination, notification: notification)
     }
 
     @objc private func refreshVisibleWindow() {
         if NSApp.isActive, let dashboard, dashboard.window.isVisible, !dashboard.window.isMiniaturized {
-            dashboard.controller.refresh()
+            dashboard.controller.refreshNotifications()
+            if dashboard.controller.section != .notifications { dashboard.controller.refresh() }
         }
     }
 
@@ -87,18 +103,37 @@ private final class GuardApplication: NSObject, NSApplicationDelegate, UNUserNot
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                              withCompletionHandler completionHandler: @escaping () -> Void) {
         let content = response.notification.request.content
-        guard let route = DashboardDestination(action: response.actionIdentifier, thread: content.threadIdentifier, userInfo: content.userInfo) else {
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else {
             completionHandler()
             return
         }
         Task { @MainActor in
-            self.present(destination: route)
+            let record = NotificationRecord(requestIdentifier: response.notification.request.identifier,
+                                            content: content, deliveredAt: response.notification.date)
+            do {
+                try self.notificationInbox.upsert(record)
+            } catch {
+                writeError("cannot save clicked notification: \(error.localizedDescription)")
+            }
+            var userInfo = content.userInfo
+            userInfo["notificationID"] = record.id
+            guard let route = DashboardDestination(action: response.actionIdentifier,
+                                                   thread: content.threadIdentifier, userInfo: userInfo) else {
+                completionHandler()
+                return
+            }
+            self.present(destination: route, notification: record)
             completionHandler()
         }
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
                                              withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        let record = NotificationRecord(requestIdentifier: notification.request.identifier,
+                                        content: notification.request.content, deliveredAt: notification.date)
+        Task { @MainActor in
+            self.dashboard?.controller.observeNotification(record)
+        }
         completionHandler([.banner, .list, .sound])
     }
 
@@ -128,14 +163,22 @@ private final class GuardApplication: NSObject, NSApplicationDelegate, UNUserNot
             content.title = title
             content.body = body
             content.threadIdentifier = "mi-guard.\(kind)"
+            let notificationID = UUID().uuidString
             var userInfo: [String: String] = [:]
             if let path = ProcessInfo.processInfo.environment["MI_GUARD_NOTIFICATION_CONFIG"], path.hasPrefix("/") {
                 userInfo["guardConfigPath"] = path
             }
             if let eventID { userInfo["decisionID"] = eventID }
+            userInfo["notificationID"] = notificationID
             content.userInfo = userInfo
             content.sound = .default
-            try await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+            let record = NotificationRecord(id: notificationID, kind: kind, title: title, body: body,
+                                            configPath: userInfo["guardConfigPath"], decisionID: eventID)
+            if let error = try await notificationInbox.deliverAndPersist(record, content: content, deliver: { request in
+                try await center.add(request)
+            }) {
+                writeError("notification delivered but history was not saved: \(error.localizedDescription)")
+            }
         case .dashboard:
             break
         }

@@ -1,6 +1,7 @@
 package history
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -14,46 +15,98 @@ import (
 	"github.com/lonelygo/mi-guard/internal/model"
 )
 
-func TestDownloadProfilesSurviveLedgerRewritesAlongsideLegacySamples(t *testing.T) {
+func TestLegacyDownloadsAreReadOnlyFilteredAndPrunedOnNextStateWrite(t *testing.T) {
 	ctx := context.Background()
-	store := testStore(t, 4)
-	old := measurement("a", 12, 128)
-	if err := store.Record(ctx, old); err != nil {
+	store := testStore(t, 20)
+	now := store.now()
+	state := newDiskState(cycleStart(now, store.billingDay))
+	state.UsedBytes = 900
+	state.Reservations["pending"] = diskReservation{Bytes: 200, CreatedAt: now.Add(-time.Minute)}
+	state.Finalized["settled"] = now.Add(-time.Hour)
+	state.Heartbeats["primary"] = HeartbeatAggregate{Scope: "primary", Attempts: 8, Failures: 1, LastAt: now}
+	profiled := measurement("current", 29, 192)
+	profiled.Profile = model.DownloadProfile{Streams: 4, TotalBytes: 512, Target: strings.Repeat("ab", 32)}
+	store.record(&state, profiled)
+	state.Samples = append(state.Samples,
+		model.Sample{At: now, Node: "region", Scope: "US", Kind: "geo", Attempts: 1},
+		model.Sample{At: now, Node: "candidate", Scope: "front", Kind: "recovery", Attempts: 1},
+	)
+	for _, kind := range []string{"bench", "sweep", "quick", "confirm"} {
+		state.Samples = append(state.Samples, model.Sample{At: now, Node: "old-" + kind, Scope: "front", Kind: kind, Mbps: 99})
+	}
+	state.Samples = append(state.Samples, model.Sample{
+		At: now, Node: "malformed", Kind: "bench", Mbps: 99,
+		Scope: downloadScopePrefix + "4/512/bad/front",
+	})
+	if err := store.write(state); err != nil {
 		t.Fatal(err)
 	}
-	sample := measurement("a", 29, 192)
-	sample.Kind, sample.Scope = "bench", "chain:a/path"
-	sample.Profile = model.DownloadProfile{Streams: 4, TotalBytes: 512, Target: strings.Repeat("ab", 32)}
-	res, err := store.Reserve(ctx, 512, 1024)
+	if _, err := store.RecordSelection(ctx, "primary", "current", now, true); err != nil {
+		t.Fatal(err)
+	}
+	analyticsPath := store.analyticsPath()
+	if err := os.WriteFile(analyticsPath, []byte("analytics sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ledgerBefore, err := os.ReadFile(store.file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Finish(ctx, res, sample); err != nil {
+	infoBefore, err := os.Stat(store.file)
+	if err != nil {
 		t.Fatal(err)
 	}
-	// The strict v1 reader sees two ordinary sample records and preserves their
-	// scope strings through a read/write cycle.
-	raw, _, err := store.load()
-	if err != nil || len(raw.Samples) != 2 {
-		t.Fatalf("v1 ledger: %+v, %v", raw, err)
-	}
-	if raw.Samples[0].Scope != old.Scope || raw.Samples[1].Scope != downloadScopePrefix+"4/512/"+sample.Profile.Target+"/"+sample.Scope {
-		t.Fatalf("stored scopes = %q, %q", raw.Samples[0].Scope, raw.Samples[1].Scope)
-	}
-	if err := store.write(raw); err != nil {
+	selectionsBefore, err := os.ReadFile(store.file + ".selections.json")
+	if err != nil {
 		t.Fatal(err)
 	}
-	view, err := store.Snapshot(ctx)
-	if err != nil || view.PendingBytes != 0 || view.UsedBytes != sample.Bytes || len(view.Samples) != 2 {
-		t.Fatalf("snapshot = %+v, %v", view, err)
+	analyticsBefore, err := os.ReadFile(analyticsPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if legacy, measured := view.Samples[0], view.Samples[1]; legacy.Profile.Known() || legacy.Scope != "front" || measured.Profile != sample.Profile || measured.Scope != sample.Scope {
-		t.Fatalf("decoded measurements = %+v", view.Samples)
+
+	view, err := store.ReadOnlySnapshot()
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, scope := range []string{"front", "download/v1/4/16/bad/front", "download/v1/9/512/" + sample.Profile.Target + "/front"} {
-		if route, profile := readDownloadScope(scope); profile.Known() || route != scope {
-			t.Errorf("unlabelled scope %q decoded as %q, %+v", scope, route, profile)
-		}
+	if len(view.Samples) != 3 || view.UsedBytes != 900 || view.PendingBytes != 200 ||
+		len(view.Heartbeats) != 1 || view.Selections["primary"].Node != "current" {
+		t.Fatalf("filtered read-only snapshot = %+v", view)
+	}
+	if view.Samples[0].Node != "current" || !view.Samples[0].Profile.Known() ||
+		view.Samples[1].Kind != "geo" || view.Samples[2].Kind != "recovery" {
+		t.Fatalf("retained samples = %+v", view.Samples)
+	}
+	ledgerAfter, err := os.ReadFile(store.file)
+	if err != nil || !bytes.Equal(ledgerBefore, ledgerAfter) {
+		t.Fatalf("read-only cleanup wrote the ledger: %v", err)
+	}
+	infoAfter, err := os.Stat(store.file)
+	if err != nil || !infoBefore.ModTime().Equal(infoAfter.ModTime()) {
+		t.Fatalf("read-only cleanup replaced the ledger: %v", err)
+	}
+
+	sweep := now.Add(time.Minute)
+	if err := store.MarkSweep(ctx, sweep); err != nil {
+		t.Fatal(err)
+	}
+	persisted, _, err := store.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.Samples) != 3 || persisted.UsedBytes != 900 || len(persisted.Reservations) != 1 ||
+		persisted.Reservations["pending"].Bytes != 200 || len(persisted.Finalized) != 1 ||
+		persisted.Finalized["settled"].IsZero() || len(persisted.Heartbeats) != 1 || !persisted.LastSweep.Equal(sweep) {
+		t.Fatalf("durable cleanup changed accounting or retained history: %+v", persisted)
+	}
+	selectionsAfter, err := os.ReadFile(store.file + ".selections.json")
+	if err != nil || !bytes.Equal(selectionsBefore, selectionsAfter) {
+		t.Fatalf("cleanup changed selection history: %v", err)
+	}
+	analyticsAfter, err := os.ReadFile(analyticsPath)
+	if err != nil || !bytes.Equal(analyticsBefore, analyticsAfter) {
+		t.Fatalf("cleanup changed analytics history: %v", err)
 	}
 }
 
@@ -196,7 +249,9 @@ func TestReadOnlySnapshotUsesLocalBillingCalendarWithoutWritingRollover(t *testi
 	state.UsedBytes = 17
 	state.Reservations["unfinished"] = diskReservation{Bytes: 5, CreatedAt: now}
 	state.LastSweep = now
-	state.Samples = []model.Sample{{At: now, Node: "node", Scope: "front", Kind: "bench", Mbps: 12, Bytes: 7}}
+	stored := measurement("node", 12, 7)
+	stored.At = now
+	s.record(&state, stored)
 	if err := s.write(state); err != nil {
 		t.Fatal(err)
 	}
@@ -492,6 +547,9 @@ func measurement(node string, mbps float64, bytes int64) model.Sample {
 		Kind:     "sweep",
 		Mbps:     mbps,
 		Bytes:    bytes,
+		Profile: model.DownloadProfile{
+			Streams: 1, TotalBytes: 4 << 20, Target: strings.Repeat("a", 64),
+		},
 	}
 }
 

@@ -42,9 +42,7 @@ struct DashboardProfile: Hashable {
     }
 
     var parameters: String {
-        if streams == 0 && requestedBytes == 0 { return "旧版记录 · 流数未知" }
-        return [isKnown ? nil : "参数不全", streams > 0 ? "\(streams) 流" : nil,
-                requestedBytes > 0 ? "每节点 \(DashboardFormat.bytes(requestedBytes))" : nil].compactMap { $0 }.joined(separator: " · ")
+        "\(streams) 流 · 每节点 \(DashboardFormat.bytes(requestedBytes))"
     }
 
     var title: String { "\(source) · \(parameters)" }
@@ -74,14 +72,13 @@ struct DashboardHistory {
     let sampleCount: Int
 
     init(_ samples: [LedgerSample]) {
-        let downloads = samples.filter { $0.kind != "heartbeat" && $0.kind != "geo" }
-        let grouped = Dictionary(grouping: downloads) { sample in
+        let grouped = Dictionary(grouping: samples) { sample in
             DashboardSeries(route: DashboardRoute(node: sample.node, provider: sample.provider, scope: sample.scope),
                             profile: DashboardProfile(kind: sample.kind, streams: sample.streams,
                                                       requestedBytes: sample.requestedBytes, target: sample.target))
-        }.mapValues { $0.sorted { $0.time < $1.time } }
+        }.filter { $0.key.profile.isKnown }.mapValues { $0.sorted { $0.time < $1.time } }
         records = grouped
-        sampleCount = downloads.count
+        sampleCount = grouped.values.reduce(0) { $0 + $1.count }
         let ranked = grouped.map { key, rows in
             let hasLine = key.canConnect && zip(rows, rows.dropFirst()).contains { a, b in
                 a.successful && b.successful && a.time < b.time

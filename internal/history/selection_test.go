@@ -38,8 +38,8 @@ func TestSelectionTenureStartsWithObservationInMissingOrLegacyHistory(t *testing
 			if err != nil || !reflect.DeepEqual(got, snapshot.Selections["primary"]) {
 				t.Fatalf("durable selection = %+v, %v", snapshot.Selections, err)
 			}
-			if legacy && (snapshot.UsedBytes != 17 || len(snapshot.Samples) != 1 || len(snapshot.Heartbeats) != 1) {
-				t.Fatalf("legacy ledger changed: %+v", snapshot)
+			if legacy && (snapshot.UsedBytes != 17 || len(snapshot.Samples) != 0 || len(snapshot.Heartbeats) != 1) {
+				t.Fatalf("legacy download cleanup changed accounting or heartbeat history: %+v", snapshot)
 			}
 		})
 	}

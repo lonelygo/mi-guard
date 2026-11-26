@@ -31,7 +31,10 @@ func newDecision(target BenchTarget, ranked []model.Sample, bench bool, nearBest
 	if len(triggerSamples) == 0 {
 		triggerSamples = target.Evidence
 	}
-	trigger := decisionTrigger(triggerSamples, bench)
+	trigger := target.DecisionTrigger
+	if trigger == "" {
+		trigger = decisionTrigger(triggerSamples, bench)
+	}
 	if trigger == "hardFailure" {
 		// Recovery deliberately ranks every live alternative. It does not apply
 		// the normal near-best bandwidth tier.
@@ -79,13 +82,63 @@ func newDecision(target BenchTarget, ranked []model.Sample, bench bool, nearBest
 			Stage:          stage,
 			Status:         status,
 		}
+		if !sample.At.IsZero() {
+			observedAt := sample.At.UTC()
+			candidate.ObservedAt = &observedAt
+		}
 		event.Candidates = append(event.Candidates, candidate)
 	}
-	if threshold, known := policy.PreferredThreshold(evidence, nearBestPct); len(ranked) > 0 && known {
+	if threshold, known := policy.PreferredThreshold(evidence, nearBestPct); trigger != "hardFailure" && len(ranked) > 0 && known {
 		event.ThresholdMbps = &threshold
 	}
 	annotateDecisionRanking(&event, evidence, ranked, target.History)
 	return event
+}
+
+func recordDecisionCandidate(event *history.Decision) func(string, string, bool) {
+	order := 0
+	return func(node, result string, online bool) {
+		node = safeDecisionLabel(node)
+		index := decisionCandidateIndex(event.Candidates, node, online)
+		if index < 0 {
+			return
+		}
+		candidate := &event.Candidates[index]
+		if online {
+			// Each terminal online result advances the chronology. A permissive
+			// geo fallback revisits the first live candidate after every strict
+			// geo attempt, so its final success must receive the later order.
+			order++
+			candidate.ValidationOrder = order
+		}
+		candidate.Validation = result
+	}
+}
+
+func decisionCandidateIndex(candidates []history.DecisionCandidate, node string, online bool) int {
+	if online {
+		// A second result for an already attempted node is the permissive geo
+		// fallback. Keep it on that same evidence row instead of borrowing a
+		// duplicate row that may have been filtered before online validation.
+		for index, candidate := range candidates {
+			if candidate.Node == node && candidate.ValidationOrder > 0 {
+				return index
+			}
+		}
+		// Prefer the ranked, still-unannotated sample when the evidence contains
+		// more than one sample for the same node.
+		for index, candidate := range candidates {
+			if candidate.Node == node && candidate.Rank > 0 && candidate.Validation == "" {
+				return index
+			}
+		}
+	}
+	for index, candidate := range candidates {
+		if candidate.Node == node && candidate.Validation == "" {
+			return index
+		}
+	}
+	return -1
 }
 
 func annotateDecisionRanking(event *history.Decision, evidence, ranked, past []model.Sample) {
@@ -220,11 +273,69 @@ func completeDecision(event *history.Decision, results []SelectionResult, applyE
 			event.Reason = safeDecisionError(applyErr)
 		}
 	}
+	hasOnlineEvidence := false
 	for index := range event.Candidates {
-		event.Candidates[index].Selected = event.After != "" && event.Candidates[index].Node == event.After && (event.Action == "switched" || event.Action == "kept")
-		if event.Candidates[index].Selected && event.Candidates[index].Rank > 1 && event.Reason == "" {
-			event.Reason = "更高排名候选未通过在线验证或切换条件"
+		candidate := &event.Candidates[index]
+		candidate.Selected = false
+		hasOnlineEvidence = hasOnlineEvidence || candidate.ValidationOrder > 0
+	}
+	if hasOnlineEvidence {
+		for index := range event.Candidates {
+			candidate := &event.Candidates[index]
+			if candidate.Rank > 0 && candidate.Validation == "" {
+				candidate.Validation = "notReached"
+			}
 		}
+	}
+	selectedIndex := selectedDecisionCandidate(event.Candidates, event.After, event.Action)
+	if selectedIndex >= 0 {
+		event.Candidates[selectedIndex].Selected = true
+		selected := event.Candidates[selectedIndex]
+		if candidateValidationSucceeded(selected.Validation) && selected.ValidationOrder > 1 && event.Reason == "" {
+			event.Reason = fmt.Sprintf(
+				"按排序完成 %d 次在线验证，前 %d 次未通过；排序 #%d 通过并被采用",
+				selected.ValidationOrder, selected.ValidationOrder-1, selected.Rank,
+			)
+		}
+	}
+}
+
+func selectedDecisionCandidate(candidates []history.DecisionCandidate, node, action string) int {
+	if node == "" || action != "switched" && action != "kept" {
+		return -1
+	}
+	best, bestOrder := -1, -1
+	for index, candidate := range candidates {
+		if candidate.Node == node && candidateValidationSucceeded(candidate.Validation) && candidate.ValidationOrder > bestOrder {
+			best, bestOrder = index, candidate.ValidationOrder
+		}
+	}
+	if best >= 0 {
+		return best
+	}
+	best, bestRank := -1, int(^uint(0)>>1)
+	for index, candidate := range candidates {
+		if candidate.Node == node && candidate.Rank > 0 && candidate.Rank < bestRank {
+			best, bestRank = index, candidate.Rank
+		}
+	}
+	if best >= 0 {
+		return best
+	}
+	for index, candidate := range candidates {
+		if candidate.Node == node {
+			return index
+		}
+	}
+	return -1
+}
+
+func candidateValidationSucceeded(validation string) bool {
+	switch validation {
+	case "passed", "fallbackRegionMismatch", "fallbackRegionProbeFailed", "fallbackRegionUnknown":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -234,7 +345,8 @@ func safeDecisionReason(action, reason string) string {
 	}
 	safePrefixes := []string{
 		"测速专用组仅用于扫描", "组类型为 ", "当前选择指向测速专用组", "没有测速成功且可直接选择的候选节点",
-		"Google 地区校验未通过", "跟随目标是测速专用组", "跟随组已被其他操作修改", "跟随组当前选择指向测速专用组",
+		"Google 地区校验未通过", "出口地区不符，按宽松策略", "地区探测失败，按宽松策略", "地区结果未确认，按宽松策略",
+		"跟随目标是测速专用组", "跟随组已被其他操作修改", "跟随组当前选择指向测速专用组",
 		"跟随组没有同名的直接成员", "跟随组已选中同一节点",
 	}
 	for _, prefix := range safePrefixes {

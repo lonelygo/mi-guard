@@ -5,6 +5,8 @@ private enum FlightMapStyle {
     static let teal = Color(red: 0.20, green: 0.84, blue: 0.69)
     static let violet = Color(red: 0.70, green: 0.43, blue: 0.98)
     static let coral = Color(red: 1.00, green: 0.42, blue: 0.43)
+    static let ink = Color(red: 0.025, green: 0.035, blue: 0.055)
+    static let captionBand: CGFloat = 86
 }
 
 struct FlightMapView: View {
@@ -15,6 +17,7 @@ struct FlightMapView: View {
     @SwiftUI.State private var showTargets = true
     @SwiftUI.State private var selectedRouteID: String?
     @SwiftUI.State private var choosingOrigin = false
+    @SwiftUI.State private var rankingExpanded = false
     @AppStorage("flightMap.originID") private var originID = ""
 
     init(data: FlightMapData, initialHorizon: FlightHorizon = .live,
@@ -27,24 +30,30 @@ struct FlightMapView: View {
     var body: some View {
         let routes = data.routes(for: horizon, now: data.generatedAt ?? Date())
         let origin = data.origin(selectedID: originID.isEmpty ? nil : originID)
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             controls(origin: origin)
             GeometryReader { geometry in
-                if geometry.size.width >= 760 {
-                    HStack(alignment: .top, spacing: 14) {
-                        map(routes: routes, origin: origin).frame(maxWidth: .infinity, maxHeight: .infinity)
-                        routeList(routes: routes).frame(minWidth: 260, idealWidth: 260, maxWidth: 260,
-                                                       maxHeight: .infinity, alignment: .top)
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 12) {
-                        map(routes: routes, origin: origin).frame(maxWidth: .infinity, minHeight: 300)
-                        routeList(routes: routes).frame(maxWidth: .infinity)
+                ZStack(alignment: .topTrailing) {
+                    map(routes: routes, origin: origin)
+                    if rankingExpanded {
+                        routeList(routes: routes)
+                            .frame(width: min(292, max(238, geometry.size.width * 0.32)))
+                            .frame(maxHeight: max(190, geometry.size.height - 72), alignment: .top)
+                            .padding(12)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    } else {
+                        Button { withAnimation(.easeOut(duration: 0.18)) { rankingExpanded = true } } label: {
+                            Label("线路排行 \(routes.count)", systemImage: "list.number")
+                                .font(.callout.weight(.semibold))
+                                .padding(.horizontal, 11).padding(.vertical, 8)
+                                .background(.ultraThinMaterial, in: Capsule())
+                        }
+                        .buttonStyle(.plain).padding(12)
+                        .help("展开线路流量排行")
                     }
                 }
             }
         }
-        .frame(minHeight: 430)
         .onAppear {
             preserveOrSelectFirst(in: routes)
         }
@@ -75,14 +84,19 @@ struct FlightMapView: View {
 
     private func map(routes: [FlightRoute], origin: FlightPlace?) -> some View {
         FlightMapCanvas(routes: routes, origin: origin, showTargets: showTargets, animated: horizon == .live,
-                        selectedRouteID: selectedRouteID) { id in
+                        selectedRouteID: selectedRouteID,
+                        bottomReserved: selectedRouteID == nil ? 0 : FlightMapStyle.captionBand) { id in
             select(id)
         }
-        .aspectRatio(2, contentMode: .fit)
+        .overlay(alignment: .bottom) {
+            if let route = routes.first(where: { $0.id == selectedRouteID }) {
+                FlightRouteCaption(route: route, live: horizon == .live)
+                    .padding(.horizontal, 18).padding(.bottom, 16)
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.secondary.opacity(0.22), lineWidth: 0.7))
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func routeList(routes: [FlightRoute]) -> some View {
@@ -91,6 +105,10 @@ struct FlightMapView: View {
                 Text(horizon == .live ? "活跃线路" : "已观测流量排行").font(.headline)
                 Spacer()
                 Text("\(routes.count)").font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                Button { withAnimation(.easeOut(duration: 0.18)) { rankingExpanded = false } } label: {
+                    Image(systemName: "xmark").frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain).help("收起线路排行")
             }
             if horizon == .live {
                 Text("字节数为当前活跃连接建立以来的累计值。").font(.caption).foregroundColor(.secondary)
@@ -115,8 +133,9 @@ struct FlightMapView: View {
             }
         }
         .padding(14)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.secondary.opacity(0.16), lineWidth: 0.7))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.10), lineWidth: 0.7))
+        .shadow(color: .black.opacity(0.22), radius: 16, y: 6)
     }
 
     private func preserveOrSelectFirst(in routes: [FlightRoute]) {
@@ -179,12 +198,12 @@ private struct FlightRouteRow: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 7) {
                     Circle().fill(selected ? FlightMapStyle.cyan : Color.secondary.opacity(0.45)).frame(width: 7, height: 7)
-                    Text(routeTitle).font(.callout.weight(.medium)).lineLimit(1)
+                    Text(route.mapTitle).font(.callout.weight(.medium)).lineLimit(1)
                     Spacer(minLength: 4)
                     Text(FlightMapFormat.bytes(route.bytes)).font(.caption.monospacedDigit()).foregroundColor(.secondary)
                 }
-                if !geography.isEmpty {
-                    Text(geography.joined(separator: " · ")).font(.caption).foregroundColor(.secondary).lineLimit(2)
+                if !route.mapGeography.isEmpty {
+                    Text(route.mapGeography.joined(separator: " · ")).font(.caption).foregroundColor(.secondary).lineLimit(2)
                 }
                 HStack {
                     if route.activeConnections > 0 {
@@ -201,25 +220,59 @@ private struct FlightRouteRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(routeTitle)
+        .accessibilityLabel(route.mapTitle)
         .accessibilityValue("流量 \(FlightMapFormat.bytes(route.bytes))，连接 \(route.activeConnections) 条\(route.hasKnownGeography ? "" : "，地区未知")")
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
-    private var routeTitle: String {
-        let proxy = [route.entry?.displayName, route.exit?.displayName].compactMap { $0 }.reduce(into: [String]()) { values, item in
+}
+
+private extension FlightRoute {
+    var mapTitle: String {
+        let proxy = [entry?.displayName, exit?.displayName].compactMap { $0 }.reduce(into: [String]()) { values, item in
             if values.last != item { values.append(item) }
         }
-        var parts = route.chain.isEmpty ? [] : [route.chain]
+        var parts = chain.isEmpty ? [] : [chain]
         parts.append(contentsOf: proxy)
-        if let target = route.target { parts.append(target.displayName) }
+        if let target { parts.append(target.displayName) }
         return parts.isEmpty ? "未知线路" : parts.joined(separator: " → ")
     }
 
-    private var geography: [String] {
-        [route.entry.map { "代理接入 \($0.displayName)" },
-         route.exit.map { "配置的线路地区 \($0.displayName)" },
-         route.target.map { "目标 \($0.displayName)" }].compactMap { $0 }
+    var mapGeography: [String] {
+        [entry.map { "代理接入 \($0.displayName)" },
+         exit.map { "配置的线路地区 \($0.displayName)" },
+         target.map { "目标 \($0.displayName)" }].compactMap { $0 }
+    }
+}
+
+private struct FlightRouteCaption: View {
+    let route: FlightRoute
+    let live: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(route.mapTitle).font(.callout.weight(.semibold)).lineLimit(2).help(route.mapTitle)
+                if !route.mapGeography.isEmpty {
+                    Text(route.mapGeography.joined(separator: "  ·  "))
+                        .font(.caption).foregroundColor(.white.opacity(0.70)).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 10)
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(FlightMapFormat.bytes(route.bytes)).font(.callout.monospacedDigit().weight(.semibold))
+                Text(live ? "\(route.activeConnections) 条活跃连接" : "\(route.activeConnections) 条观测")
+                    .font(.caption).foregroundColor(.white.opacity(0.70))
+            }
+        }
+        .foregroundColor(.white)
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .frame(maxWidth: 680)
+        .background(FlightMapStyle.ink.opacity(0.88), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.13), lineWidth: 0.7))
+        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("已选择线路 \(route.mapTitle)，流量 \(FlightMapFormat.bytes(route.bytes))，\(route.activeConnections) 条\(live ? "活跃连接" : "观测")")
     }
 }
 
@@ -229,6 +282,7 @@ private struct FlightMapCanvas: View {
     let showTargets: Bool
     let animated: Bool
     let selectedRouteID: String?
+    let bottomReserved: CGFloat
     let select: (String) -> Void
 
     @Environment(\.colorScheme) private var colorScheme
@@ -240,11 +294,14 @@ private struct FlightMapCanvas: View {
         ZStack {
             Canvas { context, size in
                 drawBackground(context: &context, size: size)
-                drawWorld(context: &context, size: size)
+                drawWorld(context: &context, size: projectedSize(size))
             }
             TimelineView(.animation(minimumInterval: activeAnimation ? 1 / 30 : 1,
                                     paused: routes.isEmpty || !activeAnimation)) { timeline in
                 Canvas { context, size in
+                    let size = projectedSize(size)
+                    // Wrapped arcs belong to the geographic viewport, including on letterboxed windows.
+                    context.clip(to: Path(FlightProjection.mapRect(in: size)))
                     let peak = max(1, routes.map(\.bytes).max() ?? 1)
                     for route in routes where route.id != selectedRouteID {
                         draw(route: route, context: &context, size: size, peak: peak, selected: false,
@@ -277,7 +334,7 @@ private struct FlightMapCanvas: View {
             .padding(10)
         }
         .overlay(FlightMapHitTargets(routes: routes, origin: origin, showTargets: showTargets,
-                                     selectedRouteID: selectedRouteID, select: select))
+                                     selectedRouteID: selectedRouteID, bottomReserved: bottomReserved, select: select))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("网络线路地图")
     }
@@ -290,62 +347,43 @@ private struct FlightMapCanvas: View {
         return "线路地区未知"
     }
 
+    private func projectedSize(_ size: CGSize) -> CGSize {
+        CGSize(width: size.width, height: max(1, size.height - min(bottomReserved, size.height * 0.32)))
+    }
+
     private func drawBackground(context: inout GraphicsContext, size: CGSize) {
-        let top = colorScheme == .dark ? Color(red: 0.055, green: 0.075, blue: 0.10) : Color(red: 0.92, green: 0.97, blue: 0.98)
-        let bottom = colorScheme == .dark ? Color(red: 0.018, green: 0.025, blue: 0.042) : Color(red: 0.82, green: 0.91, blue: 0.93)
+        let top = colorScheme == .dark ? Color(red: 0.045, green: 0.060, blue: 0.082) : Color(red: 0.925, green: 0.955, blue: 0.960)
+        let bottom = colorScheme == .dark ? FlightMapStyle.ink : Color(red: 0.845, green: 0.905, blue: 0.910)
         context.fill(Path(CGRect(origin: .zero, size: size)), with: .linearGradient(Gradient(colors: [top, bottom]),
                                                                                    startPoint: .zero, endPoint: CGPoint(x: 0, y: size.height)))
-        var grid = Path()
-        for longitude in stride(from: -120.0, through: 120, by: 60) {
-            if let a = FlightProjection.point(for: .init(latitude: -80, longitude: longitude), in: size),
-               let b = FlightProjection.point(for: .init(latitude: 80, longitude: longitude), in: size) {
-                grid.move(to: a); grid.addLine(to: b)
-            }
-        }
-        for latitude in stride(from: -60.0, through: 60, by: 30) {
-            if let a = FlightProjection.point(for: .init(latitude: latitude, longitude: -180), in: size),
-               let b = FlightProjection.point(for: .init(latitude: latitude, longitude: 180), in: size) {
-                grid.move(to: a); grid.addLine(to: b)
-            }
-        }
-        context.stroke(grid, with: .color(Color.secondary.opacity(colorScheme == .dark ? 0.13 : 0.17)),
-                       style: StrokeStyle(lineWidth: 0.6, dash: [2, 5]))
     }
 
     private func drawWorld(context: inout GraphicsContext, size: CGSize) {
-        let fill = colorScheme == .dark ? Color.white.opacity(0.105) : Color(red: 0.27, green: 0.46, blue: 0.47).opacity(0.19)
-        let line = colorScheme == .dark ? Color.white.opacity(0.20) : Color(red: 0.19, green: 0.36, blue: 0.38).opacity(0.30)
-        for polygon in FlightWorld.land {
-            var path = Path()
-            for (index, coordinate) in polygon.enumerated() {
-                guard let point = FlightProjection.point(for: coordinate, in: size) else { continue }
-                if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
-            }
-            path.closeSubpath()
-            context.fill(path, with: .color(fill))
-            context.stroke(path, with: .color(line), lineWidth: 0.7)
+        let rect = FlightProjection.mapRect(in: size)
+        let cloud = FlightLandDotCache.cloud(in: size)
+        let spacing = rect.width / CGFloat(cloud.columns)
+        let diameter = min(2.2, max(1.25, spacing * 0.25))
+        var dots = Path()
+        for point in cloud.normalizedPoints {
+            let center = CGPoint(x: rect.minX + point.x * rect.width, y: rect.minY + point.y * rect.height)
+            dots.addEllipse(in: CGRect(x: center.x - diameter / 2, y: center.y - diameter / 2,
+                                       width: diameter, height: diameter))
         }
+        let color = colorScheme == .dark ? Color.white.opacity(0.22)
+            : Color(red: 0.15, green: 0.34, blue: 0.35).opacity(0.30)
+        context.fill(dots, with: .color(color))
     }
 
     private func draw(route: FlightRoute, context: inout GraphicsContext, size: CGSize, peak: Int64,
                       selected: Bool, time: TimeInterval, animate: Bool) {
-        let width = routeWidth(route.bytes, peak: peak) + (selected ? 0.7 : 0)
-        let opacity = selected ? 0.98 : 0.53
+        let width = routeWidth(route.bytes, peak: peak) + (selected ? 0.35 : 0)
+        let opacity = selected ? 0.86 : 0.36
         for (legIndex, leg) in route.legs(origin: origin, includeTarget: showTargets).enumerated() {
             guard let from = leg.from.coordinate, let to = leg.to.coordinate else { continue }
             let color = legColor(leg.kind).opacity(opacity)
             for arc in FlightProjection.shiftedArcs(from: from, to: to, in: size) {
                 var path = Path(); path.move(to: arc.0); path.addQuadCurve(to: arc.2, control: arc.1)
                 context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: width, lineCap: .round))
-                if selected {
-                    let arrow = FlightProjection.quadraticPoint(0.64, start: arc.0, control: arc.1, end: arc.2)
-                    context.draw(Text("→").font(.caption.bold()).foregroundColor(color), at: arrow)
-                    let label = FlightProjection.quadraticPoint(0.46, start: arc.0, control: arc.1, end: arc.2)
-                    if legIndex == 0, !route.chain.isEmpty, (0...size.width).contains(label.x) {
-                        context.draw(Text(route.chain).font(.caption2.weight(.semibold)).foregroundColor(color),
-                                     at: CGPoint(x: label.x, y: label.y - 10))
-                    }
-                }
                 if animate && (selected || route.activeConnections > 0) {
                     let speed = 0.10 + Double(route.activeConnections.clamped(to: 0...20)) / 260
                     let progress = (time * speed + Double(legIndex) * 0.19).truncatingRemainder(dividingBy: 1)
@@ -371,9 +409,9 @@ private struct FlightMapCanvas: View {
         }
         for (_, item) in places {
             guard let coordinate = item.0.coordinate, let point = FlightProjection.point(for: coordinate, in: size) else { continue }
-            context.fill(Path(ellipseIn: CGRect(x: point.x - 7, y: point.y - 7, width: 14, height: 14)),
-                         with: .color(item.1.opacity(0.20)))
-            context.fill(Path(ellipseIn: CGRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)), with: .color(item.1))
+            context.fill(Path(ellipseIn: CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10)),
+                         with: .color(item.1.opacity(0.18)))
+            context.fill(Path(ellipseIn: CGRect(x: point.x - 2, y: point.y - 2, width: 4, height: 4)), with: .color(item.1))
         }
     }
 
@@ -388,7 +426,7 @@ private struct FlightMapCanvas: View {
     private func routeWidth(_ bytes: Int64, peak: Int64) -> CGFloat {
         guard bytes > 0, peak > 0 else { return 0.9 }
         let ratio = log10(Double(bytes) + 1) / max(1, log10(Double(peak) + 1))
-        return 0.8 + CGFloat(ratio) * 2.0
+        return 0.65 + CGFloat(ratio) * 1.2
     }
 }
 
@@ -409,13 +447,16 @@ private struct FlightMapHitTargets: View {
     let origin: FlightPlace?
     let showTargets: Bool
     let selectedRouteID: String?
+    let bottomReserved: CGFloat
     let select: (String) -> Void
 
     var body: some View {
         GeometryReader { geometry in
             ZStack {
                 ForEach(routes) { route in
-                    if let point = routeFocus(route, size: geometry.size) {
+                    let size = CGSize(width: geometry.size.width,
+                                      height: max(1, geometry.size.height - min(bottomReserved, geometry.size.height * 0.32)))
+                    if let point = routeFocus(route, size: size) {
                         Button { select(route.id) } label: { Color.clear.frame(width: 30, height: 30) }
                             .buttonStyle(.plain).position(point)
                             .accessibilityLabel("选择线路 \(route.id)")
@@ -428,9 +469,8 @@ private struct FlightMapHitTargets: View {
 
     private func routeFocus(_ route: FlightRoute, size: CGSize) -> CGPoint? {
         guard let leg = route.legs(origin: origin, includeTarget: showTargets).last,
-              let from = leg.from.coordinate, let to = leg.to.coordinate,
-              let arc = FlightProjection.arc(from: from, to: to, in: size) else { return nil }
-        return FlightProjection.quadraticPoint(0.5, start: arc.start, control: arc.control, end: arc.end)
+              let from = leg.from.coordinate, let to = leg.to.coordinate else { return nil }
+        return FlightProjection.visibleMidpoint(from: from, to: to, in: size)
     }
 }
 

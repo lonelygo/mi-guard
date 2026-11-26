@@ -45,6 +45,7 @@ func (r *Runner) applySelections(ctx context.Context, target BenchTarget, ranked
 		return nil, errors.New("empty group name")
 	}
 	event := newDecision(target, ranked, bench, r.Cfg.Selection.NearBestPct)
+	recordCandidate := recordDecisionCandidate(&event)
 	var notificationOld, notificationDetail string
 	var notificationResult model.Sample
 	resultErr = withSelectorLock(ctx, "apply", func() error {
@@ -83,13 +84,16 @@ func (r *Runner) applySelections(ctx context.Context, target BenchTarget, ranked
 		}
 		var eligible []model.Sample
 		for _, sample := range ranked {
-			unmeasured := !bench && sample.Kind == "recovery" && sample.Mbps == 0
+			unmeasured := !bench && event.Trigger == "hardFailure" && sample.Mbps == 0
 			if sample.Error != "" || sample.Failures > 0 && sample.Failures >= sample.Attempts ||
 				!unmeasured && (sample.Mbps <= 0 || math.IsNaN(sample.Mbps) || math.IsInf(sample.Mbps, 0)) {
+				recordCandidate(sample.Node, "measurementFailed", false)
 				continue
 			}
 			if sample.Node != "" && sample.Node != r.Cfg.Mihomo.TestGroup && contains(current.All, sample.Node) {
 				eligible = append(eligible, sample)
+			} else {
+				recordCandidate(sample.Node, "ineligible", false)
 			}
 		}
 		if len(eligible) == 0 {
@@ -110,7 +114,7 @@ func (r *Runner) applySelections(ctx context.Context, target BenchTarget, ranked
 				return nil // Follower availability is independent of the primary.
 			}
 		}
-		chosen, detail, err := r.selectRanked(ctx, group, current, eligible, snapshotFollower)
+		chosen, detail, err := r.selectRanked(ctx, group, current, eligible, snapshotFollower, recordCandidate)
 		if err != nil {
 			return err
 		}
@@ -196,7 +200,7 @@ func (r *Runner) followSelection(ctx context.Context, name string, before model.
 		group := r.benchGroup(config.Group{Name: name})
 		_, detail, err := r.selectRanked(ctx, group, now, []model.Sample{chosen}, func() error {
 			return r.verifySelection(ctx, primary, chosen.Node)
-		})
+		}, nil)
 		if err != nil {
 			out.After = ""
 			if observed, readErr := r.Core.Proxy(ctx, name); readErr == nil {

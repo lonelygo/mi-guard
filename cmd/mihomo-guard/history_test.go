@@ -173,7 +173,8 @@ groups: [{name: primary, chain: "Exit / JP"}, {name: standalone, mode: selector}
 	at := time.Now().UTC().Truncate(time.Second).Add(-72*time.Hour + 123456789*time.Nanosecond)
 	const target = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	const rawError = "Get https://private.example/subscription?token=secret: dial tcp 192.0.2.80:443"
-	sample := model.Sample{At: at, Node: "HK/01", Scope: "front", Kind: "bench", Bytes: 11}
+	sample := model.Sample{At: at, Node: "HK/01", Scope: "front", Kind: "bench", Bytes: 11,
+		Profile: model.DownloadProfile{Streams: 1, TotalBytes: 64, Target: target}}
 	settle := func(sample model.Sample) {
 		t.Helper()
 		r, err := store.Reserve(ctx, 64, 9000000000)
@@ -235,10 +236,10 @@ groups: [{name: primary, chain: "Exit / JP"}, {name: standalone, mode: selector}
 	if len(got.Samples) != 2 || len(got.Groups) != 3 {
 		t.Fatalf("expected two retained measurements and three groups: %+v", got)
 	}
-	legacy, failed := got.Samples[0], got.Samples[1]
-	if !legacy.Time.Equal(at.Add(time.Hour)) || legacy.Mbps != 16.25 || legacy.Streams != 0 || legacy.RequestedBytes != 0 ||
-		legacy.Target != "" || legacy.Bytes != 23 || legacy.Error != "" || legacy.Scope != "front" || legacy.Node != "HK/01" {
-		t.Errorf("legacy measurement: %+v", legacy)
+	current, failed := got.Samples[0], got.Samples[1]
+	if !current.Time.Equal(at.Add(time.Hour)) || current.Mbps != 16.25 || current.Streams != 1 || current.RequestedBytes != 64 ||
+		current.Target != target || current.Bytes != 23 || current.Error != "" || current.Scope != "front" || current.Node != "HK/01" {
+		t.Errorf("profiled measurement: %+v", current)
 	}
 	if failed.Streams != 4 || failed.RequestedBytes != 64 || failed.Target != target || failed.Scope != sample.Scope || failed.Bytes != 7 ||
 		failed.Attempts != 2 || failed.Failures != 1 || failed.Error != "failed" || failed.LatencyMS != 12 {

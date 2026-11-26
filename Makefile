@@ -31,6 +31,8 @@ test-macos-notify:
 	mkdir -p "$(BUILD_DIR)"
 	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) deploy/macos/NotificationSetup.swift tests/notification_setup.swift -o "$(BUILD_DIR)/notification-setup-tests"
 	"$(BUILD_DIR)/notification-setup-tests"
+	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) deploy/macos/NotificationSetup.swift deploy/macos/NotificationInboxStore.swift tests/notification_inbox.swift -o "$(BUILD_DIR)/notification-inbox-tests"
+	"$(BUILD_DIR)/notification-inbox-tests"
 
 test-macos-dashboard: cli
 	xcrun swiftc -warnings-as-errors $(SWIFT_FLAGS) deploy/macos/DashboardData.swift tests/dashboard_data.swift -o "$(BUILD_DIR)/dashboard-data-tests"

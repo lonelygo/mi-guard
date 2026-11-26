@@ -17,7 +17,7 @@ struct ManagedRoutesCard: View {
                 Text("当前配置没有纳管线路。知情的普通组决策仍会显示在线路选用页。")
                     .font(.callout).foregroundColor(.secondary)
             } else {
-                ForEach(groups.prefix(5), id: \.name) { group in
+                ForEach(groups, id: \.name) { group in
                     let latest = decisions.first { $0.group == group.name }
                     Button {
                         if let latest { onDecision(latest.id) } else { onSelections() }
@@ -53,39 +53,45 @@ struct DecisionHistoryPanel: View {
     let selected: DecisionRecord?
     let requestedID: String?
     let onDecision: (String) -> Void
+    @State private var historyExpanded = false
 
     var body: some View {
-        if let focus = selected ?? (requestedID == nil ? decisions.first : nil) {
-            DecisionDetailCard(decision: focus)
+        if let focus = selected {
+            DecisionDetailCard(decision: focus).id(focus.id)
         }
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("近期决策", systemImage: "clock.arrow.circlepath").font(.headline)
-                Spacer()
-                Text("保留最近记录").font(.caption).foregroundColor(.secondary)
+            DashboardDisclosureButton(isExpanded: $historyExpanded) {
+                HStack(spacing: 8) {
+                    Label("近期决策", systemImage: "clock.arrow.circlepath").font(.headline)
+                    Spacer()
+                    Text(decisions.isEmpty ? "暂无记录" : "\(decisions.count) 条")
+                        .font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                }
             }
-            if decisions.isEmpty {
-                Text("新版本完成一次测速判断后，这里会显示保持、切换、跳过和失败的证据。")
-                    .font(.callout).foregroundColor(.secondary)
-            } else {
-                ForEach(decisions.prefix(12)) { decision in
-                    Button { onDecision(decision.id) } label: {
-                        HStack(spacing: 9) {
-                            Image(systemName: DecisionAppearance.symbol(decision.action))
-                                .foregroundColor(DecisionAppearance.color(decision.action)).frame(width: 17)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(verbatim: decision.group).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
-                                Text(verbatim: DecisionAppearance.route(decision)).font(.caption).foregroundColor(.secondary)
-                                    .lineLimit(1).truncationMode(.middle)
+            if historyExpanded {
+                if decisions.isEmpty {
+                    Text("完成一次测速判断后，这里会显示保持、切换、跳过和失败的证据。")
+                        .font(.callout).foregroundColor(.secondary)
+                } else {
+                    ForEach(decisions) { decision in
+                        Button { onDecision(decision.id) } label: {
+                            HStack(spacing: 9) {
+                                Image(systemName: DecisionAppearance.symbol(decision.action))
+                                    .foregroundColor(DecisionAppearance.color(decision.action)).frame(width: 17)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(verbatim: decision.group).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                                    Text(verbatim: DecisionAppearance.route(decision)).font(.caption).foregroundColor(.secondary)
+                                        .lineLimit(1).truncationMode(.middle)
+                                }
+                                Spacer(minLength: 4)
+                                Text(verbatim: DashboardFormat.stamp.string(from: decision.at))
+                                    .font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                                Image(systemName: "chevron.right").font(.caption).foregroundColor(.secondary)
                             }
-                            Spacer(minLength: 4)
-                            Text(verbatim: DashboardFormat.stamp.string(from: decision.at))
-                                .font(.caption.monospacedDigit()).foregroundColor(.secondary)
-                            Image(systemName: "chevron.right").font(.caption).foregroundColor(.secondary)
-                        }
-                        .padding(.vertical, 3).contentShape(Rectangle())
-                        .background((requestedID == decision.id || selected?.id == decision.id) ? DashboardStyle.accent.opacity(0.1) : .clear)
-                    }.buttonStyle(.plain)
+                            .padding(.vertical, 3).contentShape(Rectangle())
+                            .background((requestedID == decision.id || selected?.id == decision.id) ? DashboardStyle.accent.opacity(0.1) : .clear)
+                        }.buttonStyle(.plain)
+                    }
                 }
             }
         }.dashboardCard()
@@ -94,6 +100,7 @@ struct DecisionHistoryPanel: View {
 
 private struct DecisionDetailCard: View {
     let decision: DecisionRecord
+    @State private var evidenceExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
@@ -131,22 +138,37 @@ private struct DecisionDetailCard: View {
                                    decision.nearBestPct.map { "\(DashboardFormat.number($0))%" } ?? "未记录")
                     decisionMetric("同档门槛", finite(decision.thresholdMbps).map { "\(DashboardFormat.number($0)) Mbps" } ?? "未记录")
                 }
-                decisionMetric(decision.trigger == "hardFailure" ? "已测候选下限" : "绝对下限",
+                decisionMetric(decision.trigger == "hardFailure" ? "历史带宽下限" : "绝对下限",
                                positive(decision.minMbps).map { "\(DashboardFormat.number($0)) Mbps" } ?? "未配置")
+            }
+
+            if let recoverySummary = legacyRecoverySummary {
+                Label(recoverySummary, systemImage: "info.circle")
+                    .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             }
 
             if !decision.evidence.isEmpty {
                 Divider()
-                Text("候选证据").font(.headline)
-                if decision.evidence.contains(where: { ($0.rank ?? 0) > 0 }) {
-                    Text("同档候选依次比较可靠性失败率、同测法历史 P25、当前节点保持和 HTTP 延迟；低于门槛的后备候选先比较本轮带宽。")
-                        .font(.caption).foregroundColor(.secondary)
+                DashboardDisclosureButton(isExpanded: $evidenceExpanded) {
+                    HStack(spacing: 8) {
+                        Label("候选证据", systemImage: "list.number").font(.headline)
+                        Spacer()
+                        Text("\(decision.evidence.count) 个候选")
+                            .font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                    }
                 }
-                let maximum = max(decision.evidence.compactMap(\.mbps).filter { $0.isFinite && $0 > 0 }.max() ?? 0,
-                                  decision.thresholdMbps ?? 0, decision.minMbps ?? 0)
-                ForEach(displayOrder(decision.evidence)) { candidate in
-                    CandidateEvidenceRow(candidate: candidate, maximum: maximum,
-                                         threshold: decision.thresholdMbps ?? 0, minimum: decision.minMbps ?? 0)
+                if evidenceExpanded {
+                    Text(evidenceExplanation)
+                        .font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                    let maximum = max(decision.evidence.compactMap(\.mbps).filter { $0.isFinite && $0 > 0 }.max() ?? 0,
+                                      decision.thresholdMbps ?? 0, decision.minMbps ?? 0)
+                    let candidates = DecisionEvidencePresentation.displayOrder(decision.evidence)
+                    ForEach(candidates.indices, id: \.self) { index in
+                        let candidate = candidates[index]
+                        CandidateEvidenceRow(candidate: candidate, maximum: maximum,
+                                             threshold: decision.thresholdMbps ?? 0, minimum: decision.minMbps ?? 0,
+                                             recovery: decision.trigger == "hardFailure")
+                    }
                 }
             }
 
@@ -186,14 +208,15 @@ private struct DecisionDetailCard: View {
         return value
     }
 
-    private func displayOrder(_ candidates: [DecisionCandidate]) -> [DecisionCandidate] {
-        candidates.sorted { left, right in
-            let leftRank = left.rank ?? Int.max
-            let rightRank = right.rank ?? Int.max
-            if leftRank != rightRank { return leftRank < rightRank }
-            if left.selected != right.selected { return left.selected == true }
-            return left.node.localizedStandardCompare(right.node) == .orderedAscending
+    private var evidenceExplanation: String {
+        if decision.trigger == "hardFailure" {
+            return "故障恢复按长期可靠性排序执行节点与链路验证。严格地区模式要求出口匹配；宽松模式可在地区验证均未确认后采用首个链路可用候选。带宽是历史参考样本，常规带宽容差不参与故障恢复。"
         }
+        return "同档候选依次比较可靠性失败率、同测法历史 P25、当前节点保持和 HTTP 延迟；低于门槛的后备候选先比较本轮带宽。"
+    }
+
+    private var legacyRecoverySummary: String? {
+        DecisionEvidencePresentation.legacyRecoverySummary(decision)
     }
 
     private func decisionMetric(_ title: String, _ value: String) -> some View {
@@ -209,15 +232,20 @@ private struct CandidateEvidenceRow: View {
     let maximum: Double
     let threshold: Double
     let minimum: Double
+    let recovery: Bool
 
     var body: some View {
         let speed = candidate.mbps.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
-                Image(systemName: candidate.selected == true ? "checkmark.circle.fill" : "circle")
-                    .foregroundColor(candidate.selected == true ? DashboardStyle.accent : .secondary)
+                Image(systemName: validationSymbol)
+                    .foregroundColor(validationColor)
+                if let order = candidate.validationOrder, order > 0 {
+                    Text(verbatim: "验证 #\(order)").font(.caption.weight(.semibold)).monospacedDigit()
+                        .foregroundColor(candidate.selected == true ? DashboardStyle.accent : .secondary)
+                }
                 if let rank = candidate.rank, rank > 0 {
-                    Text(verbatim: "#\(rank)").font(.caption.weight(.semibold)).monospacedDigit()
+                    Text(verbatim: recovery ? "排序 #\(rank)" : "#\(rank)").font(.caption.weight(.semibold)).monospacedDigit()
                         .foregroundColor(candidate.selected == true ? DashboardStyle.accent : .secondary)
                 }
                 Text(verbatim: candidate.node).font(.callout.weight(candidate.selected == true ? .semibold : .regular))
@@ -226,7 +254,7 @@ private struct CandidateEvidenceRow: View {
                 if let latency = candidate.latencyMS, latency > 0 {
                     Text(verbatim: "\(latency) ms").font(.caption.monospacedDigit()).foregroundColor(.secondary)
                 }
-                Text(verbatim: speed.map { "\(DashboardFormat.number($0)) Mbps" } ?? "—")
+                Text(verbatim: speed.map { (recovery ? "历史 " : "") + "\(DashboardFormat.number($0)) Mbps" } ?? "—")
                     .font(.callout.monospacedDigit()).foregroundColor(speed == nil ? Color(nsColor: .systemRed) : .primary)
             }
             if maximum > 0 {
@@ -257,7 +285,15 @@ private struct CandidateEvidenceRow: View {
     }
 
     private var methodLabel: String {
-        var parts: [String] = [DecisionAppearance.measurement(candidate.kind)]
+        let measurement = DecisionAppearance.measurement(candidate.kind)
+        var parts: [String] = recovery
+            ? ["历史带宽参考", measurement == "故障恢复候选" ? "来源未记录" : "来源 \(measurement)"]
+            : [measurement]
+        if let observedAt = candidate.observedAt {
+            parts.append("样本 \(DashboardFormat.precise.string(from: observedAt))")
+        } else if recovery {
+            parts.append("样本时间未记录")
+        }
         if let streams = candidate.streams, streams > 0 { parts.append("\(streams) 流") }
         if let bytes = candidate.requestedBytes, bytes > 0 { parts.append("每节点 \(DashboardFormat.bytes(bytes))") }
         if candidate.preferredBand == true { parts.append("同档候选") }
@@ -272,7 +308,9 @@ private struct CandidateEvidenceRow: View {
             parts.append("失败 \(failures)/\(attempts)")
         }
         if let attempts = candidate.strategyAttempts, attempts > 0 {
-            parts.append("可靠性失败 \(candidate.strategyFailures ?? 0)/\(attempts)（含本轮）")
+            parts.append(DecisionEvidencePresentation.strategyReliability(
+                failures: candidate.strategyFailures ?? 0, attempts: attempts, recovery: recovery
+            ))
         }
         if let attempts = candidate.historyAttempts, attempts > 0 {
             parts.append("同测法历史失败 \(candidate.historyFailures ?? 0)/\(attempts)")
@@ -283,7 +321,73 @@ private struct CandidateEvidenceRow: View {
             parts.append(samples == 0 ? "同测法历史带宽缺失" : "同测法历史 \(samples) 条 · P25 至少需 3 条")
         }
         if let provider = candidate.provider, !provider.isEmpty { parts.append(provider) }
+        if let validation = DecisionEvidencePresentation.validationLabel(candidate, recovery: recovery) {
+            parts.append(validation)
+        }
         return parts.joined(separator: " · ")
+    }
+
+    private var validationSymbol: String {
+        if candidate.selected == true || DecisionAppearance.validationSucceeded(candidate.validation) {
+            return "checkmark.circle.fill"
+        }
+        if let validation = candidate.validation, validation != "notReached" {
+            return "xmark.circle.fill"
+        }
+        return "circle"
+    }
+
+    private var validationColor: Color {
+        if candidate.selected == true || DecisionAppearance.validationSucceeded(candidate.validation) {
+            return DashboardStyle.accent
+        }
+        return candidate.validation == nil || candidate.validation == "notReached"
+            ? .secondary : Color(nsColor: .systemOrange)
+    }
+}
+
+enum DecisionEvidencePresentation {
+    static func displayOrder(_ candidates: [DecisionCandidate]) -> [DecisionCandidate] {
+        candidates.sorted { left, right in
+            let leftValidation = positive(left.validationOrder) ?? Int.max
+            let rightValidation = positive(right.validationOrder) ?? Int.max
+            if leftValidation != rightValidation { return leftValidation < rightValidation }
+            let leftRank = positive(left.rank) ?? Int.max
+            let rightRank = positive(right.rank) ?? Int.max
+            if leftRank != rightRank { return leftRank < rightRank }
+            if left.selected != right.selected { return left.selected == true }
+            return left.node.localizedStandardCompare(right.node) == .orderedAscending
+        }
+    }
+
+    static func legacyRecoverySummary(_ decision: DecisionRecord) -> String? {
+        guard decision.trigger == "hardFailure",
+              !decision.evidence.contains(where: { positive($0.validationOrder) != nil }),
+              let selectedRank = decision.evidence.first(where: { $0.selected == true })?.rank,
+              selectedRank > 0 else { return nil }
+        if selectedRank == 1 {
+            return "采用排序 #1。此旧记录未保存逐候选在线验证阶段。"
+        }
+        return "采用排序 #\(selectedRank)。此旧记录未保存逐候选在线验证结果，无法还原排序 #1–#\(selectedRank - 1) 的具体失败阶段。"
+    }
+
+    static func strategyReliability(failures: Int, attempts: Int, recovery: Bool) -> String {
+        if recovery {
+            return "排序可靠性失败 \(failures)/\(attempts)（截至参考样本）"
+        }
+        return "可靠性失败 \(failures)/\(attempts)（含本轮）"
+    }
+
+    static func validationLabel(_ candidate: DecisionCandidate, recovery: Bool) -> String? {
+        if let validation = candidate.validation {
+            return DecisionAppearance.validation(validation)
+        }
+        return recovery ? "在线验证结果未记录（旧记录）" : nil
+    }
+
+    private static func positive(_ value: Int?) -> Int? {
+        guard let value, value > 0 else { return nil }
+        return value
     }
 }
 
@@ -338,6 +442,39 @@ private enum DecisionAppearance {
         case "confirm": return "复测"
         case "recovery": return "故障恢复候选"
         default: return value?.isEmpty == false ? value! : "测法未记录"
+        }
+    }
+
+    static func validation(_ value: String) -> String {
+        switch value {
+        case "passed": return "在线验证通过"
+        case "fallbackRegionMismatch": return "链路通过；出口地区不符，按宽松策略采用"
+        case "fallbackRegionProbeFailed": return "链路通过；地区探测失败，按宽松策略采用"
+        case "fallbackRegionUnknown": return "链路通过；地区结果未确认，按宽松策略采用"
+        case "measurementFailed": return "测速记录不可用"
+        case "ineligible": return "不在可切换成员中"
+        case "belowMinimum": return "低于绝对带宽下限"
+        case "proxyReadFailed": return "无法读取节点状态"
+        case "notPhysical": return "不是可直接选择的物理节点"
+        case "nodeUnavailable": return "节点存活验证失败"
+        case "selectionRejected": return "控制器未接受切换"
+        case "selectionFailed": return "切换未确认"
+        case "routeUnavailable": return "链路验证失败"
+        case "regionProbeFailed": return "地区探测请求失败"
+        case "regionMismatch": return "出口地区验证不符"
+        case "routeProofFailed": return "无法证明验证流量经过目标链路"
+        case "readbackFailed": return "切换回读验证失败"
+        case "notReached": return "此前已有候选结束本次选择，未执行在线验证"
+        default: return "在线验证结果：\(value)"
+        }
+    }
+
+    static func validationSucceeded(_ value: String?) -> Bool {
+        switch value {
+        case "passed", "fallbackRegionMismatch", "fallbackRegionProbeFailed", "fallbackRegionUnknown":
+            return true
+        default:
+            return false
         }
     }
 

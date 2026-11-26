@@ -37,7 +37,7 @@ func latestBandwidth(samples []model.Sample, inventory map[string]model.Proxy, n
 		if node.Dialer != "" {
 			scope = "chain:" + node.Name
 		}
-		if s.Scope != scope || s.Error != "" || s.Failures != 0 || !(s.Mbps > 0) || math.IsInf(s.Mbps, 0) ||
+		if s.Scope != scope || !s.Profile.Known() || s.Error != "" || s.Failures != 0 || !(s.Mbps > 0) || math.IsInf(s.Mbps, 0) ||
 			s.At.IsZero() || s.At.After(now) || s.At.Before(result[s.Node].At) {
 			continue
 		}
@@ -96,16 +96,13 @@ func reportLiveGroup(out io.Writer, group config.Group, current string, nodes []
 		delay = p.label()
 	}
 	bandwidth := "暂无测速记录"
-	if sample.Mbps > 0 {
+	if sample.Mbps > 0 && sample.Profile.Known() {
 		age := now.Sub(sample.At)
 		freshness := "前"
 		if age > maxAge {
 			freshness = "前，已过期"
 		}
-		streams := "旧记录，流数未知"
-		if sample.Profile.Known() {
-			streams = fmt.Sprintf("%d 流", sample.Profile.Streams)
-		}
+		streams := fmt.Sprintf("%d 流", sample.Profile.Streams)
 		bandwidth = fmt.Sprintf("%.2f Mbps / %.2f MiB/s（%s，%s，%s%s）", sample.Mbps, mibPerSecond(sample.Mbps), sample.Kind, streams, durationLabel(age), freshness)
 	}
 	longestNode, longest := "", time.Duration(0)

@@ -45,18 +45,25 @@ enum HelperMode: Equatable {
 }
 
 enum DashboardSection: String, CaseIterable {
-    case overview, nodes, selections, flights
+    case overview, nodes, selections, notifications, flights
 }
 
 struct DashboardDestination: Equatable {
     let section: DashboardSection
     let configURL: URL?
     let decisionID: String?
+    let notificationID: String?
 
     init?(action: String, thread: String, userInfo: [AnyHashable: Any]) {
         guard action == UNNotificationDefaultActionIdentifier else { return nil }
-        section = thread == "mi-guard.switch" ? .selections : .overview
         decisionID = (userInfo["decisionID"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        notificationID = (userInfo["notificationID"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        if notificationID != nil {
+            section = .notifications
+        } else {
+            // Banners delivered by v0.2.0 do not contain an inbox identifier.
+            section = thread == "mi-guard.switch" ? .selections : .overview
+        }
         if let path = userInfo["guardConfigPath"] as? String, path.hasPrefix("/") {
             configURL = URL(fileURLWithPath: path).standardizedFileURL
         } else {

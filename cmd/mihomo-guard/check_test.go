@@ -23,11 +23,12 @@ import (
 
 func TestCheckBandwidthUsesMatchingProviderScopeAndTime(t *testing.T) {
 	now := time.Now()
+	profile := model.DownloadProfile{Streams: 1, TotalBytes: 4 << 20, Target: strings.Repeat("a", 64)}
 	proxies := map[string]model.Proxy{
 		"a": {Name: "a", Type: "Vless", Provider: "pool"},
 		"b": {Name: "b", Type: "Trojan", Provider: "pool", Dialer: "front"},
 	}
-	good := model.Sample{Node: "a", Provider: "pool", Scope: "front", Kind: "bench", At: now.Add(-time.Hour), Mbps: 32}
+	good := model.Sample{Node: "a", Provider: "pool", Scope: "front", Kind: "bench", At: now.Add(-time.Hour), Mbps: 32, Profile: profile}
 	chain := good
 	chain.Node, chain.Scope = "b", "chain:b"
 	samples := []model.Sample{good, chain}
@@ -38,6 +39,7 @@ func TestCheckBandwidthUsesMatchingProviderScopeAndTime(t *testing.T) {
 		func(s *model.Sample) { s.At = now.Add(time.Minute) },
 		func(s *model.Sample) { s.Error = "download failed" },
 		func(s *model.Sample) { s.Node = "b" },
+		func(s *model.Sample) { s.Profile = model.DownloadProfile{} },
 	} {
 		invalid := good
 		invalid.At, invalid.Mbps = now, 999
@@ -52,7 +54,8 @@ func TestCheckBandwidthUsesMatchingProviderScopeAndTime(t *testing.T) {
 
 func TestCheckReportDistinguishesFreshProbesHistoricalBandwidthAndTenure(t *testing.T) {
 	now := time.Now()
-	measured := model.Sample{At: now.Add(-2 * time.Hour), Mbps: 32, Kind: "bench"}
+	measured := model.Sample{At: now.Add(-2 * time.Hour), Mbps: 32, Kind: "bench",
+		Profile: model.DownloadProfile{Streams: 1, TotalBytes: 4 << 20, Target: strings.Repeat("a", 64)}}
 	tenure := history.SelectionTenure{Node: "a", Since: now.Add(-time.Hour), LastSeen: now, GuardSelected: true, Longest: map[string]time.Duration{"a": time.Hour, "b": 2 * time.Hour}}
 	group := config.Group{Name: "前置组", Chain: "链"}
 	probes := map[string]memberProbe{"a": {delay: 17}}
@@ -61,7 +64,7 @@ func TestCheckReportDistinguishesFreshProbesHistoricalBandwidthAndTenure(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"链", "前置组", "本次探测可用 1/2，1 个未能确认", "当前 a", "HTTP 延迟 17 ms", "32.00 Mbps / 3.81 MiB/s", "旧记录，流数未知", "已过期", "已选用 1h0m0s（自 guard 切换）", "最长选用记录 b 2h0m0s"} {
+	for _, want := range []string{"链", "前置组", "本次探测可用 1/2，1 个未能确认", "当前 a", "HTTP 延迟 17 ms", "32.00 Mbps / 3.81 MiB/s", "bench，1 流", "已过期", "已选用 1h0m0s（自 guard 切换）", "最长选用记录 b 2h0m0s"} {
 		if !strings.Contains(report.String(), want) {
 			t.Errorf("missing %q in %s", want, report.String())
 		}

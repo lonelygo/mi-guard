@@ -25,10 +25,12 @@ private enum DashboardDataTests {
           "decisions":[
             {"id":"decision-1","at":"2026-03-15T08:02:00Z","source":"manual","group":"primary","chain":"exit",
              "before":"a","after":"b","action":"switched","trigger":"manualBench","nearBestPct":20,"thresholdMbps":80,
-             "candidates":[{"node":"b","kind":"bench","mbps":100,"latencyMS":30,"attempts":2,"failures":0,
+             "candidates":[{"node":"b","kind":"bench","observedAt":"2026-03-15T07:45:00Z",
+                            "mbps":100,"latencyMS":30,"attempts":2,"failures":0,
                             "streams":4,"requestedBytes":16777216,"rank":1,"preferredBand":true,
                             "strategyAttempts":8,"strategyFailures":1,"historyAttempts":6,"historyFailures":1,
-                            "historySamples":3,"historyP25Mbps":88,"selected":true}],
+                            "historySamples":3,"historyP25Mbps":88,"validationOrder":1,
+                            "validation":"passed","selected":true}],
              "followers":[{"group":"direct","before":"a","after":"b","action":"switched"}]}
           ],
           "selectedDecision":{"id":"decision-1","at":"2026-03-15T08:02:00Z","source":"manual","group":"primary",
@@ -53,6 +55,8 @@ private enum DashboardDataTests {
         precondition(decision.id == "decision-1" && decision.evidence[0].selected == true && decision.evidence[0].streams == 4)
         precondition(decision.evidence[0].rank == 1 && decision.evidence[0].preferredBand == true && decision.evidence[0].historyP25Mbps == 88)
         precondition(decision.evidence[0].strategyAttempts == 8 && decision.evidence[0].historyAttempts == 6)
+        precondition(decision.evidence[0].observedAt?.timeIntervalSince(decision.at) == -17 * 60)
+        precondition(decision.evidence[0].validationOrder == 1 && decision.evidence[0].validation == "passed")
         precondition(decision.followResults[0].group == "direct" && snapshot.selectedDecision?.id == decision.id)
 
         func sample(_ mbps: Double, failures: Int = 0, error: String = "") -> LedgerSample {

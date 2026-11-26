@@ -263,30 +263,36 @@ final class FlightPanelController: ObservableObject {
 struct FlightPanel: View {
     let configURL: URL?
     @SwiftUI.StateObject private var controller: FlightPanelController
+    @SwiftUI.State private var showingGeoInfo = false
 
     init(reader: URL, configURL: URL?) {
         self.configURL = configURL
         _controller = SwiftUI.StateObject(wrappedValue: FlightPanelController(reader: reader, configURL: configURL))
     }
 
+    @MainActor init(controller: FlightPanelController, configURL: URL?) {
+        self.configURL = configURL
+        _controller = SwiftUI.StateObject(wrappedValue: controller)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    notices
-                    if let data = controller.data {
-                        FlightMapView(data: data)
-                    } else if controller.connecting {
-                        FlightPanelEmpty(symbol: "antenna.radiowaves.left.and.right", title: "正在连接 Mihomo…",
-                                         detail: "首次快照到达后可查看活跃连接和守护进程观测到的历史流量。")
-                    } else {
-                        FlightPanelEmpty(symbol: "map", title: "尚无线路数据",
-                                         detail: "检查配置后重新连接。已有历史不会因内核离线而被清除。")
-                    }
+            VStack(alignment: .leading, spacing: 10) {
+                notices
+                if let data = controller.data {
+                    FlightMapView(data: data)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if controller.connecting {
+                    FlightPanelEmpty(symbol: "antenna.radiowaves.left.and.right", title: "正在连接 Mihomo…",
+                                     detail: "首次快照到达后可查看活跃连接和守护进程观测到的历史流量。")
+                } else {
+                    FlightPanelEmpty(symbol: "map", title: "尚无线路数据",
+                                     detail: "检查配置后重新连接。已有历史不会因内核离线而被清除。")
                 }
-                .padding(.horizontal, 22).padding(.bottom, 20)
             }
+            .padding(.horizontal, 22).padding(.bottom, 20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
@@ -318,7 +324,7 @@ struct FlightPanel: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("线路地图").font(.system(size: 26, weight: .semibold)).accessibilityAddTraits(.isHeader)
+                Text("飞行地图").font(.system(size: 26, weight: .semibold)).accessibilityAddTraits(.isHeader)
                 if let generatedAt = controller.data?.generatedAt {
                     Text("更新于 \(FlightPanelFormat.stamp.string(from: generatedAt))")
                         .font(.callout).foregroundColor(.secondary)
@@ -328,6 +334,23 @@ struct FlightPanel: View {
             }
             Spacer()
             if controller.connecting { ProgressView().controlSize(.small).accessibilityLabel("正在连接线路数据") }
+            if let notice = controller.data?.geoNotice {
+                Button { showingGeoInfo.toggle() } label: {
+                    Image(systemName: "info.circle").frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain)
+                .help("地区信息")
+                .accessibilityLabel("地区信息")
+                .accessibilityValue(notice)
+                .popover(isPresented: $showingGeoInfo, arrowEdge: .top) {
+                    VStack(alignment: .leading, spacing: 7) {
+                        Label("地区信息", systemImage: "location.circle").font(.headline)
+                        Text(verbatim: notice).font(.callout).foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    }
+                    .padding(14).frame(width: 330, alignment: .leading)
+                }
+            }
             FlightOnlineBadge(online: controller.data?.online)
             Button(action: controller.refresh) { Label("重新连接", systemImage: "arrow.clockwise") }
                 .disabled(controller.connecting)
@@ -348,9 +371,6 @@ struct FlightPanel: View {
         }
         if let error = controller.data?.historyError {
             FlightNotice(symbol: "clock.badge.exclamationmark", title: "部分历史暂不可用", detail: error, color: .orange)
-        }
-        if let notice = controller.data?.geoNotice {
-            FlightNotice(symbol: "location.circle", title: "地区信息", detail: notice, color: .secondary)
         }
     }
 }

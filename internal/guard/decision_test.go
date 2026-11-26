@@ -2,7 +2,6 @@ package guard
 
 import (
 	"errors"
-	"math"
 	"strings"
 	"testing"
 	"time"
@@ -48,7 +47,7 @@ func TestDecisionFailureDoesNotPersistRawControllerError(t *testing.T) {
 
 func TestRecoveryDecisionRecordsItsActualRankingTolerance(t *testing.T) {
 	event := newDecision(BenchTarget{Group: config.Group{Name: "warp"}}, []model.Sample{{Node: "a", Kind: "recovery", Mbps: 50}}, false, 20)
-	if event.Trigger != "hardFailure" || event.NearBestPct != 100 || event.ThresholdMbps == nil || math.Abs(*event.ThresholdMbps) > 0.0001 {
+	if event.Trigger != "hardFailure" || event.NearBestPct != 100 || event.ThresholdMbps != nil {
 		t.Fatalf("recovery evidence = %+v", event)
 	}
 	if time.Since(event.At) > time.Minute {
@@ -56,7 +55,7 @@ func TestRecoveryDecisionRecordsItsActualRankingTolerance(t *testing.T) {
 	}
 }
 
-func TestDecisionExplainsWhyPolicyRanksASlowerCandidateFirst(t *testing.T) {
+func TestDecisionExplainsPolicyRankingWithoutInventingValidation(t *testing.T) {
 	profile := model.DownloadProfile{Streams: 4, TotalBytes: 16 << 20, Target: strings.Repeat("a", 64)}
 	sample := func(node string, speed float64, at int64, failures int) model.Sample {
 		return model.Sample{At: time.Unix(at, 0), Node: node, Provider: "provider", Scope: "front", Kind: "bench",
@@ -83,7 +82,7 @@ func TestDecisionExplainsWhyPolicyRanksASlowerCandidateFirst(t *testing.T) {
 		t.Fatalf("ranking explanation fast=%+v stable=%+v", fast, stable)
 	}
 	completeDecision(&event, []SelectionResult{{Group: "group", Before: "stable-slower", After: "current-fast", Action: "switched"}}, nil)
-	if event.Reason != "更高排名候选未通过在线验证或切换条件" {
-		t.Fatalf("fallback selection explanation = %q", event.Reason)
+	if event.Reason != "" || event.Candidates[0].Validation != "" || event.Candidates[1].Validation != "" {
+		t.Fatalf("validation was inferred without execution evidence: %+v", event)
 	}
 }

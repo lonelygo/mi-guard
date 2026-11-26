@@ -23,6 +23,7 @@ private extension DashboardSection {
         case .nodes: return "节点分析"
         case .selections: return "线路选用"
         case .flights: return "飞行地图"
+        case .notifications: return "通知记录"
         }
     }
 
@@ -32,6 +33,7 @@ private extension DashboardSection {
         case .nodes: return "waveform.path.ecg"
         case .selections: return "arrow.triangle.branch"
         case .flights: return "map"
+        case .notifications: return "bell"
         }
     }
 }
@@ -45,22 +47,48 @@ extension View {
     }
 }
 
+struct DashboardDisclosureButton<Label: View>: View {
+    @Binding var isExpanded: Bool
+    @ViewBuilder let label: () -> Label
+
+    var body: some View {
+        Button {
+            isExpanded.toggle()
+        } label: {
+            HStack(spacing: 9) {
+                HStack(spacing: 9) { label() }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption.weight(.semibold)).foregroundColor(.secondary).accessibilityHidden(true)
+            }
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(isExpanded ? "已展开" : "已折叠")
+    }
+}
+
 struct DashboardView: View {
     @ObservedObject var controller: DashboardController
+    var showSettings: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
-            DashboardSidebar(controller: controller)
+            DashboardSidebar(controller: controller, showSettings: showSettings)
             Divider()
             if controller.section == .flights {
                 FlightPanel(reader: controller.readerURL, configURL: controller.configURL)
                     .id(controller.configURL)
+            } else if controller.section == .notifications {
+                NotificationInboxView(controller: controller)
             } else {
                 DashboardPage(section: controller.section, snapshot: controller.snapshot,
                               history: DashboardHistory(controller.snapshot?.samples ?? []),
                               problem: controller.problem, loading: controller.loading, refresh: controller.refresh,
                               requestedDecisionID: controller.requestedDecisionID,
-                              navigate: { controller.section = $0 }, focusDecision: controller.focusDecision)
+                              navigate: { controller.clearDecisionFocus(); controller.section = $0 },
+                              focusDecision: controller.focusDecision)
                     .id(controller.configURL)
             }
         }
@@ -72,6 +100,7 @@ struct DashboardView: View {
 
 private struct DashboardSidebar: View {
     @ObservedObject var controller: DashboardController
+    let showSettings: () -> Void
     private static let icon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns").flatMap { NSImage(contentsOf: $0) }
 
     var body: some View {
@@ -90,7 +119,7 @@ private struct DashboardSidebar: View {
             List {
                 ForEach(DashboardSection.allCases, id: \.self) { section in
                     let selected = section == controller.section
-                    Button { controller.section = section } label: {
+                    Button { select(section) } label: {
                         HStack(spacing: 9) {
                             Image(systemName: section.dashboardSymbol)
                                 .frame(width: 19).foregroundColor(selected ? DashboardStyle.accent : .secondary)
@@ -110,22 +139,24 @@ private struct DashboardSidebar: View {
             .onMoveCommand { direction in
                 let destinations = Array(DashboardSection.allCases)
                 guard let i = destinations.firstIndex(of: controller.section) else { return }
-                if direction == .up && i > 0 { controller.section = destinations[i - 1] }
-                if direction == .down && i + 1 < destinations.count { controller.section = destinations[i + 1] }
+                if direction == .up && i > 0 { select(destinations[i - 1]) }
+                if direction == .down && i + 1 < destinations.count { select(destinations[i + 1]) }
             }
 
             Divider()
-            VStack(alignment: .leading, spacing: 7) {
-                Text("当前配置").font(.caption).foregroundColor(.secondary)
-                Text(verbatim: controller.configURL?.lastPathComponent ?? "默认配置")
-                    .font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
-                    .help(controller.configURL?.path ?? "默认配置")
-                Button(action: controller.chooseConfig) { Label("选择配置…", systemImage: "folder") }
-                    .controlSize(.small)
+            Button(action: showSettings) {
+                Label("设置…", systemImage: "gearshape")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 17).padding(.vertical, 11).contentShape(Rectangle())
             }
-            .padding(16)
+            .buttonStyle(.plain).help("打开 mi-guard 设置 (⌘,)")
         }
         .frame(width: 176).background(.regularMaterial)
+    }
+
+    private func select(_ section: DashboardSection) {
+        if section == .selections { controller.clearDecisionFocus() }
+        controller.section = section
     }
 }
 
@@ -199,8 +230,7 @@ private struct DashboardPage: View {
                                 Label(warning, systemImage: "exclamationmark.triangle")
                                     .font(.callout).foregroundColor(.secondary).dashboardCard(12)
                             }
-                            DecisionHistoryPanel(decisions: snapshot.decisionHistory, selected: snapshot.selectedDecision,
-                                                 requestedID: requestedDecisionID, onDecision: focusDecision)
+                            if requestedDecisionID != nil { decisionPanel(snapshot) }
                             if snapshot.groups.isEmpty {
                                 DashboardEmpty(symbol: "arrow.triangle.branch", title: "暂无线路选用记录",
                                                detail: "首次观测到策略组的选用节点后，这里会显示节点和观测时段。").dashboardCard()
@@ -209,9 +239,10 @@ private struct DashboardPage: View {
                                     Text("运行 mihomo-guard check 或启动 daemon 后，这里会记录各组实际选用的节点。")
                                         .font(.callout).foregroundColor(.secondary)
                                 }
-                                ForEach(snapshot.groups, id: \.name) { group in SelectionCard(group: group) }
+                                SelectionGroupsCard(groups: snapshot.groups, decisions: snapshot.decisionHistory, onDecision: focusDecision)
                             }
-                        case .flights:
+                            if requestedDecisionID == nil { decisionPanel(snapshot) }
+                        case .flights, .notifications:
                             EmptyView()
                         }
                     } else if problem == nil {
@@ -221,7 +252,7 @@ private struct DashboardPage: View {
                 }
                 .padding(.horizontal, 22).padding(.bottom, 20).frame(maxWidth: .infinity, alignment: .leading)
             }
-            .id(section)
+            .id(section == .selections ? "selections/" + (requestedDecisionID ?? "") : section.rawValue)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear { if let selection { requested = selection } }
@@ -235,13 +266,20 @@ private struct DashboardPage: View {
         case .nodes: return "\(history.routes.count) 条测速路径 · \(history.sampleCount) 条历史记录"
         case .selections: return "选用时长截至各策略组的末次观测"
         case .flights: return "Mihomo 内核路由的实时与历史流向"
+        case .notifications: return "通知记录"
         }
+    }
+
+    private func decisionPanel(_ snapshot: DashboardSnapshot) -> some View {
+        DecisionHistoryPanel(decisions: snapshot.decisionHistory,
+                             selected: snapshot.selectedDecision.flatMap { $0.id == requestedDecisionID ? $0 : nil },
+                             requestedID: requestedDecisionID, onDecision: focusDecision)
     }
 
     private func selectRoute(_ route: DashboardRoute) { requested = history.profiles[route]?.first }
 }
 
-private struct DashboardEmpty: View {
+struct DashboardEmpty: View {
     let symbol: String
     let title: String
     let detail: String
@@ -364,6 +402,7 @@ private struct TrendCard: View {
     let inNodes: Bool
     let selectRoute: (DashboardRoute) -> Void
     let selectSeries: (DashboardSeries) -> Void
+    @ViewState private var expanded = true
     @ViewState private var showRows = false
 
     var body: some View {
@@ -372,91 +411,155 @@ private struct TrendCard: View {
         let rows = all.filter { domain.contains($0.time) }
         let plot = DashboardPlot(series: series, domain: domain, readings: rows.map { ($0.time, $0.successful ? $0.mbps : nil) })
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Label("历史吞吐量", systemImage: "chart.xyaxis.line").font(.headline)
-                Spacer()
-                Picker("历史时段", selection: $period) {
-                    ForEach(DashboardPeriod.allCases, id: \.self) { Text($0.title).tag($0) }
-                }.labelsHidden().pickerStyle(.segmented).frame(width: 208)
+            HStack(spacing: 16) {
+                DashboardDisclosureButton(isExpanded: $expanded) {
+                    Label("历史吞吐量", systemImage: "chart.xyaxis.line").font(.headline)
+                }
+                if expanded {
+                    Picker("历史时段", selection: $period) {
+                        ForEach(DashboardPeriod.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }.labelsHidden().pickerStyle(.segmented).frame(width: 208)
+                }
             }
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 3) {
-                    if inNodes {
-                        Text(verbatim: series.route.name).font(.headline).lineLimit(1).truncationMode(.middle)
-                    } else {
-                        SeriesMenu(name: "节点与路径", current: series.route.name, values: history.routes,
-                                   selected: Binding(get: { series.route }, set: { selectRoute($0) }), title: { $0.title })
-                    }
-                    Text(verbatim: series.route.context).font(.caption).foregroundColor(.secondary).lineLimit(1).truncationMode(.middle)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading).help(series.route.title)
-                Divider()
-                VStack(alignment: .leading, spacing: 3) {
-                    SeriesMenu(name: "测量方式", current: series.profile.source, values: history.profiles[series.route] ?? [],
-                               selected: Binding(get: { series }, set: { selectSeries($0) }), title: { option in
-                        history.profileLabel(option)
-                    })
-                    Text(verbatim: series.profile.parameters).font(.caption).foregroundColor(.secondary).lineLimit(1).truncationMode(.middle)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading).help(series.profile.details)
-            }
-            .padding(10).background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.065)))
-
-            if let latest = rows.last {
-                HStack(alignment: .lastTextBaseline, spacing: 7) {
-                    if latest.successful {
-                        Text(verbatim: DashboardFormat.number(latest.mbps)).font(.system(size: 25, weight: .semibold)).monospacedDigit()
-                        Text("Mbps").font(.callout).foregroundColor(.secondary)
-                    } else {
-                        Label("测速失败", systemImage: "xmark.circle").font(.headline).foregroundColor(Color(nsColor: .systemRed))
-                    }
-                    Text(verbatim: "最近一次 · \(DashboardFormat.shortStamp.string(from: latest.time))")
-                        .font(.caption).foregroundColor(.secondary).help(DashboardFormat.precise.string(from: latest.time))
-                    Spacer(minLength: 4)
-                    Text(series.canConnect ? "成功 \(rows.count - plot.failures.count) 次 · 失败 \(plot.failures.count) 次" : "参数或路径不全 · 仅显示独立点")
-                        .font(.caption).foregroundColor(.secondary)
-                }
-                if !latest.successful && !latest.error.isEmpty {
-                    Text(verbatim: latest.error == "failed" ? "未取得有效的下载结果" : latest.error)
-                        .font(.callout).textSelection(.enabled)
-                }
-                DashboardChart(plot: plot)
-                Divider()
-                if inNodes {
-                    Text("测速明细（\(rows.count)）").font(.headline)
-                    SampleRows(rows: rows)
-                } else {
-                    DisclosureGroup(isExpanded: $showRows) {
-                        SampleRows(rows: rows).padding(.top, 7)
-                    } label: { Text("测速明细（\(rows.count)）").font(.callout.weight(.medium)) }
-                }
-            } else {
-                VStack(spacing: 0) {
-                    DashboardEmpty(symbol: "calendar", title: "此时段没有测速记录", detail: "")
-                    if period != .all { Button("查看全部时段") { period = .all } }
-                }.padding(.bottom, 8)
+            if expanded {
+                selectors
+                measurements(rows: rows, plot: plot)
             }
         }.dashboardCard()
+    }
+
+    private var selectors: some View {
+        HStack(spacing: 0) {
+            if inNodes {
+                SeriesLabel(current: series.route.name, detail: series.route.context, selectable: false)
+                    .help(series.route.title)
+            } else {
+                SeriesMenu(name: "节点与路径", current: series.route.name, detail: series.route.context,
+                           values: history.routes, selected: Binding(get: { series.route }, set: selectRoute), title: { $0.title })
+            }
+            Divider().padding(.vertical, 6)
+            SeriesMenu(name: "测量方式", current: series.profile.source, detail: series.profile.parameters,
+                       values: history.profiles[series.route] ?? [], selected: Binding(get: { series }, set: selectSeries),
+                       title: history.profileLabel)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.secondary.opacity(0.065)))
+    }
+
+    @ViewBuilder private func measurements(rows: [LedgerSample], plot: DashboardPlot) -> some View {
+        if let latest = rows.last {
+            HStack(alignment: .lastTextBaseline, spacing: 7) {
+                if latest.successful {
+                    Text(verbatim: DashboardFormat.number(latest.mbps)).font(.system(size: 25, weight: .semibold)).monospacedDigit()
+                    Text("Mbps").font(.callout).foregroundColor(.secondary)
+                } else {
+                    Label("测速失败", systemImage: "xmark.circle").font(.headline).foregroundColor(Color(nsColor: .systemRed))
+                }
+                Text(verbatim: "最近一次 · \(DashboardFormat.shortStamp.string(from: latest.time))")
+                    .font(.caption).foregroundColor(.secondary).help(DashboardFormat.precise.string(from: latest.time))
+                Spacer(minLength: 4)
+                Text(series.canConnect ? "成功 \(rows.count - plot.failures.count) 次 · 失败 \(plot.failures.count) 次" : "参数或路径不全 · 仅显示独立点")
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            if !latest.successful && !latest.error.isEmpty {
+                Text(verbatim: latest.error == "failed" ? "未取得有效的下载结果" : latest.error)
+                    .font(.callout).textSelection(.enabled)
+            }
+            DashboardChart(plot: plot)
+            Divider()
+            DashboardDisclosureButton(isExpanded: $showRows) {
+                Text("测速明细（\(rows.count)）").font(.callout.weight(.medium))
+            }
+            if showRows { SampleRows(rows: rows) }
+        } else {
+            VStack(spacing: 0) {
+                DashboardEmpty(symbol: "calendar", title: "此时段没有测速记录", detail: "")
+                if period != .all { Button("查看全部时段") { period = .all } }
+            }.padding(.bottom, 8)
+        }
+    }
+}
+
+private struct SeriesLabel: View {
+    let current: String
+    let detail: String
+    let selectable: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(verbatim: current).font(.headline)
+                Text(verbatim: detail).font(.caption).foregroundColor(.secondary)
+            }.lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 0)
+            if selectable { Image(systemName: "chevron.down").font(.caption.weight(.semibold)).foregroundColor(.secondary) }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 private struct SeriesMenu<Value: Hashable>: View {
     let name: String
     let current: String
+    let detail: String
     let values: [Value]
     let selected: Binding<Value>
     let title: (Value) -> String
 
     var body: some View {
-        Menu {
-            Picker(name, selection: selected) {
-                ForEach(values, id: \.self) { value in Text(verbatim: title(value)).tag(value) }
-            }.pickerStyle(.inline)
-        } label: {
-            Text(verbatim: current).font(.headline).lineLimit(1).truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        SeriesLabel(current: current, detail: detail, selectable: true)
+            .accessibilityHidden(true)
+            .overlay(SeriesPopUp(name: name, titles: values.map(title),
+                                 selection: values.firstIndex(of: selected.wrappedValue)) { index in
+                if values.indices.contains(index) { selected.wrappedValue = values[index] }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity))
+            .help(title(selected.wrappedValue))
+    }
+}
+
+// Keep the native menu, keyboard interaction and VoiceOver control over the full two-line label.
+struct SeriesPopUp: NSViewRepresentable {
+    let name: String
+    let titles: [String]
+    let selection: Int?
+    let choose: (Int) -> Void
+
+    final class Coordinator: NSObject {
+        var choose: (Int) -> Void
+        init(choose: @escaping (Int) -> Void) { self.choose = choose }
+        @objc func picked(_ sender: NSPopUpButton) { choose(sender.indexOfSelectedItem) }
+    }
+
+    final class FullRowPopUpButton: NSPopUpButton {
+        override var intrinsicContentSize: NSSize {
+            NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
         }
-        .menuStyle(.borderlessButton).accessibilityLabel(name).accessibilityValue(title(selected.wrappedValue))
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(choose: choose) }
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let control = FullRowPopUpButton(frame: .zero, pullsDown: false)
+        control.isTransparent = true
+        control.target = context.coordinator
+        control.action = #selector(Coordinator.picked(_:))
+        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        control.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return control
+    }
+
+    func updateNSView(_ control: NSPopUpButton, context: Context) {
+        context.coordinator.choose = choose
+        if control.itemTitles != titles {
+            control.removeAllItems()
+            for (index, title) in titles.enumerated() {
+                control.menu?.addItem(NSMenuItem(title: title, action: nil, keyEquivalent: ""))
+                control.item(at: index)?.tag = index
+            }
+        }
+        control.selectItem(at: selection ?? -1)
+        control.setAccessibilityLabel(name)
     }
 }
 
@@ -500,53 +603,64 @@ private struct SampleRows: View {
     }
 }
 
-private struct SelectionCard: View {
-    let group: LedgerGroup
+private struct SelectionGroupsCard: View {
+    let groups: [LedgerGroup]
+    let decisions: [DecisionRecord]
+    let onDecision: (String) -> Void
 
     var body: some View {
-        let span = DashboardFormat.span(since: group.since, lastSeen: group.lastSeen)
-        VStack(alignment: .leading, spacing: 11) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Label { Text(verbatim: group.name).font(.headline) } icon: {
-                    Image(systemName: "arrow.triangle.branch").foregroundColor(DashboardStyle.accent)
-                }
-                Spacer()
-                Text(group.configured ? "已配置策略组" : "历史策略组").font(.caption).foregroundColor(.secondary)
-            }
-            if !group.chain.isEmpty {
-                Text(verbatim: "代理链  \(group.chain)").font(.callout).foregroundColor(.secondary)
-            }
-            if group.node.isEmpty && group.since == nil && group.lastSeen == nil {
-                Text("尚无选用观测").font(.callout).foregroundColor(.secondary).padding(.vertical, 3)
-            } else {
-                HStack(alignment: .top, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("最近观测节点").font(.caption).foregroundColor(.secondary)
-                        Text(verbatim: group.node.isEmpty ? "未记录" : group.node).font(.system(size: 18, weight: .semibold))
-                        if group.guardSelected { Text("自 guard 确认切换").font(.caption).foregroundColor(.secondary) }
-                    }
-                    Spacer(minLength: 6)
-                    VStack(alignment: .trailing, spacing: 4) {
-                        Text("本次观测跨度").font(.caption).foregroundColor(.secondary)
-                        Text(verbatim: span == 0 && !group.guardSelected ? "首次观察" : span.map(DashboardFormat.duration) ?? "未记录")
-                            .font(.headline).monospacedDigit()
-                    }.help(span.map { "\($0) 秒" } ?? "缺少完整观测时段")
-                }
-                HStack(spacing: 18) {
-                    Text(verbatim: "起始  \(group.since.map(DashboardFormat.stamp.string) ?? "未记录")")
-                    Text(verbatim: "末次  \(group.lastSeen.map(DashboardFormat.stamp.string) ?? "未记录")")
-                }.font(.callout.monospacedDigit()).foregroundColor(.secondary)
-            }
-            if !group.longestNode.isEmpty && group.longestSeconds.isFinite && group.longestSeconds >= 0 {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("策略组状态", systemImage: "arrow.triangle.branch").font(.headline)
+            ForEach(groups, id: \.name) { group in
                 Divider()
-                HStack(spacing: 8) {
-                    Label("最长观测", systemImage: "clock.arrow.circlepath").foregroundColor(.secondary)
-                    Text(verbatim: group.longestNode)
-                    Spacer()
-                    Text(verbatim: DashboardFormat.duration(group.longestSeconds)).monospacedDigit()
-                }.font(.callout).help("\(group.longestNode) · \(group.longestSeconds) 秒")
+                SelectionGroupRow(group: group, latest: decisions.first { $0.group == group.name }, onDecision: onDecision)
+            }
+        }.dashboardCard()
+    }
+}
+
+private struct SelectionGroupRow: View {
+    let group: LedgerGroup
+    let latest: DecisionRecord?
+    let onDecision: (String) -> Void
+    @ViewState private var expanded = false
+
+    private var span: String {
+        guard let seconds = DashboardFormat.span(since: group.since, lastSeen: group.lastSeen) else { return "尚无观测" }
+        if seconds == 0 && !group.guardSelected { return "首次观测" }
+        return "已观测 " + DashboardFormat.duration(seconds)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            DashboardDisclosureButton(isExpanded: $expanded) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(verbatim: group.name).font(.callout.weight(.semibold))
+                    Text(verbatim: group.chain.isEmpty ? (group.configured ? "手动策略组" : "已观测策略组") : "前置组 · " + group.chain)
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(verbatim: group.node.isEmpty ? "未记录节点" : group.node).font(.callout.weight(.medium))
+                    Text(verbatim: span).font(.caption.monospacedDigit()).foregroundColor(.secondary)
+                }
+            }
+            .lineLimit(1).truncationMode(.middle).padding(.vertical, 2)
+            if expanded {
+                VStack(alignment: .leading, spacing: 5) {
+                    if let start = group.since, let end = group.lastSeen {
+                        Text(verbatim: "观测时段  " + DashboardFormat.stamp.string(from: start) + " – " + DashboardFormat.stamp.string(from: end))
+                        if group.guardSelected { Text("起于守护进程确认切换") }
+                    } else { Text("尚未记录选用时段") }
+                    if !group.longestNode.isEmpty {
+                        Text(verbatim: "最长观测  " + group.longestNode + " · " + DashboardFormat.duration(group.longestSeconds))
+                    }
+                    if let latest {
+                        Button("查看最近一次决策") { onDecision(latest.id) }.buttonStyle(.link)
+                    }
+                }
+                .font(.callout).foregroundColor(.secondary).textSelection(.enabled).padding(.bottom, 5)
             }
         }
-        .textSelection(.enabled).dashboardCard()
     }
 }

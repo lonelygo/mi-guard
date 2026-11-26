@@ -19,6 +19,9 @@ type BenchTarget struct {
 	Group   config.Group
 	Type    string
 	Current string
+	// DecisionTrigger overrides inference when a workflow reuses historical
+	// samples. Hard recovery keeps each sample's original measurement kind.
+	DecisionTrigger string
 	// Evidence keeps all measurements behind a decision, including failures
 	// that policy ranking correctly omits from the selectable list.
 	Evidence []model.Sample
