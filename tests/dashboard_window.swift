@@ -112,6 +112,12 @@ private struct DashboardWindowTests {
         let recoveryReliability = DecisionEvidencePresentation.strategyReliability(failures: 2, attempts: 9, recovery: true)
         precondition(recoveryReliability == "排序可靠性失败 2/9（截至参考样本）" && !recoveryReliability.contains("本轮"))
         precondition(DecisionEvidencePresentation.strategyReliability(failures: 1, attempts: 4, recovery: false).contains("本轮"))
+
+        let latencyJSON = #"{"id":"latency","at":"2026-11-25T08:00:00Z","source":"manual","group":"warp","action":"kept","latencyFactor":1.5,"candidates":[{"node":"slow","latencyMS":975,"validation":"latencyAboveLimit"},{"node":"unknown","validation":"latencyUnknown"}]}"#.data(using: .utf8)!
+        let latency = try decoder.decode(DecisionRecord.self, from: latencyJSON)
+        precondition(latency.latencyFactor == 1.5 && latency.latencyThresholdMS == nil)
+        precondition(DecisionEvidencePresentation.validationLabel(latency.evidence[0], recovery: false)?.contains("抖动阈值") == true)
+        precondition(DecisionEvidencePresentation.validationLabel(latency.evidence[1], recovery: false)?.contains("缺少有效") == true)
     }
 
     private static func testTransientNotificationFocus(in directory: URL, reader: URL,
@@ -216,6 +222,7 @@ private struct DashboardWindowTests {
             "id": "fixture-switch", "at": ISO8601DateFormatter().string(from: at), "source": "manual",
             "group": "美西优选", "chain": "美西出口", "before": "洛杉矶 · LA 02", "after": "洛杉矶 · LA 01",
             "action": "switched", "trigger": "manualBench", "nearBestPct": 20, "thresholdMbps": 92.8, "minMbps": 40,
+            "latencyMeanMS": 140.0, "latencySamples": 40, "latencyFactor": 1.5, "latencyThresholdMS": 210.0,
             "candidates": [
                 ["node": "洛杉矶 · LA 01", "kind": "bench", "observedAt": sampleAt,
                  "mbps": 97.0, "latencyMS": 168, "attempts": 2,

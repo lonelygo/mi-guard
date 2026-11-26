@@ -142,6 +142,16 @@ private struct DecisionDetailCard: View {
                                positive(decision.minMbps).map { "\(DashboardFormat.number($0)) Mbps" } ?? "未配置")
             }
 
+            if decision.trigger != "hardFailure", let factor = positive(decision.latencyFactor) {
+                HStack(spacing: 15) {
+                    decisionMetric("历史延迟基准", latencyBaseline)
+                    decisionMetric("抖动阈值", finite(decision.latencyThresholdMS).map {
+                        "\(DashboardFormat.number($0)) ms"
+                    } ?? "本轮不筛选")
+                    decisionMetric("阈值倍率", "\(DashboardFormat.number(factor))×")
+                }
+            }
+
             if let recoverySummary = legacyRecoverySummary {
                 Label(recoverySummary, systemImage: "info.circle")
                     .font(.callout).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -212,7 +222,22 @@ private struct DecisionDetailCard: View {
         if decision.trigger == "hardFailure" {
             return "故障恢复按长期可靠性排序执行节点与链路验证。严格地区模式要求出口匹配；宽松模式可在地区验证均未确认后采用首个链路可用候选。带宽是历史参考样本，常规带宽容差不参与故障恢复。"
         }
+        if decision.latencyThresholdMS != nil {
+            return "先按本组历史 HTTP 延迟基准剔除抖动或缺少有效延迟的候选，再按本轮带宽分档。同档候选依次比较可靠性失败率、同测法历史 P25、当前节点保持和 HTTP 延迟。"
+        }
+        if decision.latencyFactor != nil {
+            if (decision.latencySamples ?? 0) > 0 {
+                return "历史延迟均值为 0 ms，本轮沿用带宽分档与可靠性规则。"
+            }
+            return "本轮开始时尚无组延迟历史，按带宽选优。分组测速完成后会用有效的 HTTP 204 读数建立基准。"
+        }
         return "同档候选依次比较可靠性失败率、同测法历史 P25、当前节点保持和 HTTP 延迟；低于门槛的后备候选先比较本轮带宽。"
+    }
+
+    private var latencyBaseline: String {
+        guard let samples = decision.latencySamples, samples > 0,
+              let mean = finite(decision.latencyMeanMS) else { return "冷启动 · 尚无样本" }
+        return "\(DashboardFormat.number(mean)) ms · \(samples) 次"
     }
 
     private var legacyRecoverySummary: String? {
@@ -236,6 +261,7 @@ private struct CandidateEvidenceRow: View {
 
     var body: some View {
         let speed = candidate.mbps.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        let latency = candidate.latencyMS ?? 0
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
                 Image(systemName: validationSymbol)
@@ -251,7 +277,7 @@ private struct CandidateEvidenceRow: View {
                 Text(verbatim: candidate.node).font(.callout.weight(candidate.selected == true ? .semibold : .regular))
                     .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 4)
-                if let latency = candidate.latencyMS, latency > 0 {
+                if latency > 0 || (latency == 0 && (candidate.attempts ?? 0) >= 2) {
                     Text(verbatim: "\(latency) ms").font(.caption.monospacedDigit()).foregroundColor(.secondary)
                 }
                 Text(verbatim: speed.map { (recovery ? "历史 " : "") + "\(DashboardFormat.number($0)) Mbps" } ?? "—")
@@ -452,6 +478,8 @@ private enum DecisionAppearance {
         case "fallbackRegionProbeFailed": return "链路通过；地区探测失败，按宽松策略采用"
         case "fallbackRegionUnknown": return "链路通过；地区结果未确认，按宽松策略采用"
         case "measurementFailed": return "测速记录不可用"
+        case "latencyAboveLimit": return "延迟高于本组抖动阈值，未参加带宽选优"
+        case "latencyUnknown": return "缺少有效 HTTP 延迟，未参加带宽选优"
         case "ineligible": return "不在可切换成员中"
         case "belowMinimum": return "低于绝对带宽下限"
         case "proxyReadFailed": return "无法读取节点状态"

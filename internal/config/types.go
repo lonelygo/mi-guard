@@ -54,12 +54,13 @@ type Speed struct {
 	BillingDay          int           `yaml:"billing_day"`
 }
 type Selection struct {
-	SevereDropPct     float64           `yaml:"severe_drop_pct"`
-	NearBestPct       float64           `yaml:"near_best_pct"`
-	SlowConfirmations int               `yaml:"slow_confirmations"`
-	SyncDirect        bool              `yaml:"sync_direct_on_warp_switch"`
-	FollowGroups      map[string]string `yaml:"follow_groups"`
-	MaxAge            time.Duration     `yaml:"max_sample_age"`
+	SevereDropPct        float64           `yaml:"severe_drop_pct"`
+	NearBestPct          float64           `yaml:"near_best_pct"`
+	LatencyOutlierFactor float64           `yaml:"latency_outlier_factor"`
+	SlowConfirmations    int               `yaml:"slow_confirmations"`
+	SyncDirect           bool              `yaml:"sync_direct_on_warp_switch"`
+	FollowGroups         map[string]string `yaml:"follow_groups"`
+	MaxAge               time.Duration     `yaml:"max_sample_age"`
 }
 
 // Follower returns the selector to mirror after a verified primary change.

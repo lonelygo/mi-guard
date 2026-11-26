@@ -8,6 +8,7 @@ import (
 
 	"github.com/lonelygo/mi-guard/internal/guard"
 	"github.com/lonelygo/mi-guard/internal/model"
+	"github.com/lonelygo/mi-guard/internal/policy"
 )
 
 func TestBenchOutputShowsComparableUnitsAndMissingMeasurements(t *testing.T) {
@@ -66,5 +67,47 @@ func TestBenchProgressVisibleBeforeFirstResultAndPlainInPipe(t *testing.T) {
 	}
 	if strings.ContainsAny(output.String(), "\r\x1b") {
 		t.Fatalf("terminal escapes in pipe: %q", output.String())
+	}
+}
+
+func TestBenchLatencyGateExplanation(t *testing.T) {
+	valid := model.Sample{Node: "steady", Kind: "bench", Mbps: 80, LatencyMS: 150, Attempts: 2}
+	outlier := model.Sample{Node: "slow\nnode", Kind: "bench", Mbps: 100, LatencyMS: 151, Attempts: 2}
+	unknown := model.Sample{Node: "unknown", Kind: "bench", Mbps: 90, Attempts: 1}
+	gate := policy.LatencyGate{MeanMS: 100, Samples: 12, Factor: 1.5}
+	var output bytes.Buffer
+	printLatencyGate(&output, "group", gate, []model.Sample{valid, outlier, unknown})
+	for _, want := range []string{
+		"延迟筛选 group · 历史均值 100.0 ms · 12 次有效探测 · 1.50 倍阈值 150.0 ms",
+		"剔除 slow node · 151 ms", "剔除 unknown · 本轮 HTTP 延迟缺失",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("latency explanation %q is missing %q", output.String(), want)
+		}
+	}
+	if strings.Contains(output.String(), "steady") {
+		t.Fatalf("eligible node printed as excluded: %q", output.String())
+	}
+	output.Reset()
+	printLatencyGate(&output, "group", gate, []model.Sample{{Node: "unreachable", Kind: "bench", Error: "204 probe: HTTP 504"}})
+	if !strings.Contains(output.String(), "没有测速成功的候选") {
+		t.Fatalf("failed probes presented as passing: %q", output.String())
+	}
+}
+
+func TestBenchLatencyGateColdStartAndDisabled(t *testing.T) {
+	for _, test := range []struct {
+		gate policy.LatencyGate
+		want string
+	}{
+		{gate: policy.LatencyGate{Factor: 1.5}, want: "冷启动"},
+		{gate: policy.LatencyGate{}, want: "已关闭"},
+		{gate: policy.LatencyGate{MeanMS: 0, Samples: 4, Factor: 1.5}, want: "比例门槛不可用"},
+	} {
+		var output bytes.Buffer
+		printLatencyGate(&output, "group", test.gate, nil)
+		if !strings.Contains(output.String(), test.want) {
+			t.Errorf("latency explanation %q is missing %q", output.String(), test.want)
+		}
 	}
 }

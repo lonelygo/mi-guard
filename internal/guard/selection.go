@@ -9,6 +9,7 @@ import (
 
 	"github.com/lonelygo/mi-guard/internal/config"
 	"github.com/lonelygo/mi-guard/internal/model"
+	"github.com/lonelygo/mi-guard/internal/policy"
 )
 
 // SelectionResult describes the primary or its follower in execution order.
@@ -97,6 +98,11 @@ func (r *Runner) applySelections(ctx context.Context, target BenchTarget, ranked
 			}
 		}
 		if len(eligible) == 0 {
+			if allBandwidthExcluded(target.LatencyGate, target.Evidence) {
+				primary.Action, primary.Reason = "kept", noLatencyCandidate
+				results = append(results, primary)
+				return r.recordSelection(ctx, primary, primaryObserved)
+			}
 			primary.Reason = "没有测速成功且可直接选择的候选节点"
 			results = append(results, primary)
 			return nil
@@ -162,9 +168,24 @@ func (r *Runner) applySelections(ctx context.Context, target BenchTarget, ranked
 		r.logWarn("record selection decision failed", "group", group.Name, "action", event.Action, "error", decisionErr)
 	}
 	if notificationResult.Node != "" {
-		r.notifySwitch(group, notificationOld, notificationResult, notificationDetail, eventID)
+		r.notifySwitch(group, notificationOld, notificationResult, notificationDetail, eventID, event.Trigger)
 	}
 	return results, resultErr
+}
+
+const noLatencyCandidate = "延迟筛选后没有合格候选，保留当前节点"
+
+func allBandwidthExcluded(gate policy.LatencyGate, measured []model.Sample) bool {
+	excluded := false
+	for _, sample := range measured {
+		if policy.HasBandwidth(sample) {
+			if gate.Exclusion(sample) == "" {
+				return false
+			}
+			excluded = true
+		}
+	}
+	return excluded
 }
 
 func nonSelectorReason(typ string) string {

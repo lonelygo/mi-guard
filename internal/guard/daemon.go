@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -157,7 +158,7 @@ func (d *daemonRuntime) recoverHard(ctx context.Context, group config.Group, cur
 			ranked[index].Kind = "recovery"
 		}
 	}
-	selected, err := d.apply(ctx, group, current, ranked, ranked, snapshot.Samples, "hardFailure")
+	selected, err := d.apply(ctx, group, current, ranked, ranked, snapshot.Samples, "hardFailure", policy.LatencyGate{})
 	if err != nil {
 		return err
 	}
@@ -225,6 +226,12 @@ func (d *daemonRuntime) runFullScan(ctx context.Context, groups []config.Group) 
 			summaries = append(summaries, group.Name+"：没有可测速候选")
 			continue
 		}
+		gate, err := d.runner.GroupLatencyGate(group.Name)
+		if err != nil {
+			d.runner.logWarn("read latency baseline before sweep failed", "group", group.Name, "error", err)
+			summaries = append(summaries, group.Name+"：无法读取延迟历史")
+			continue
+		}
 		if !started {
 			if markErr := d.runner.Store.MarkSweep(ctx, time.Now().UTC()); markErr != nil {
 				d.runner.logWarn("record full-sweep cadence failed", "error", markErr)
@@ -245,9 +252,18 @@ func (d *daemonRuntime) runFullScan(ctx context.Context, groups []config.Group) 
 			summaries = append(summaries, fmt.Sprintf("%s：测速中断，已完成 %d/%d", group.Name, len(fresh), len(candidates)))
 			continue
 		}
-		ranked := policy.Rank(proxy.Now, fresh, before.Samples, d.runner.Cfg.Selection.NearBestPct)
-		summaries = append(summaries, summarize(group.Name, proxy.Now, ranked))
-		d.considerSlow(ctx, group, proxy.Now, fresh, before.Samples)
+		if err := d.runner.RecordGroupLatencies(ctx, group.Name, fresh); err != nil {
+			d.runner.logWarn("record sweep latencies failed", "group", group.Name, "error", err)
+		}
+		ranked := policy.Rank(proxy.Now, gate.Filter(fresh), before.Samples, d.runner.Cfg.Selection.NearBestPct)
+		summary := summarize(group.Name, proxy.Now, ranked)
+		if allBandwidthExcluded(gate, fresh) {
+			summary = group.Name + "：" + noLatencyCandidate
+		} else if current, ok := sampleFor(proxy.Now, fresh); ok && gate.Exclusion(current) != "" && len(ranked) > 0 {
+			summary = fmt.Sprintf("%s：当前 %s 未通过延迟筛选，推荐 %s %.1f Mbps", group.Name, proxy.Now, ranked[0].Node, ranked[0].Mbps)
+		}
+		summaries = append(summaries, summary)
+		d.considerSlow(ctx, group, proxy.Now, fresh, before.Samples, gate)
 	}
 	if started && len(summaries) > 0 && d.runner.Notify != nil && d.runner.Cfg.Notifications.Enabled && d.runner.Cfg.Notifications.Summary {
 		body := fmt.Sprintf("%s；成功 %d/%d，下载 %.1f MiB", strings.Join(summaries, "；"), measured, attempted, float64(measuredBytes)/(1<<20))
@@ -318,27 +334,39 @@ func (d *daemonRuntime) runActiveCheck(ctx context.Context, group config.Group) 
 		d.runner.logWarn("read history for active check failed", "group", group.Name, "error", err)
 		return
 	}
+	gate, err := d.runner.GroupLatencyGate(group.Name)
+	if err != nil {
+		d.runner.logWarn("read latency baseline before active check failed", "group", group.Name, "error", err)
+		return
+	}
 	sample, err := d.measure(ctx, proxy.Now, "quick", d.runner.Cfg.Speed.QuickBytes)
 	if err != nil {
 		d.runner.logWarn("active speed check failed", "group", group.Name, "node", proxy.Now, "error", err)
 		return
 	}
-	d.considerSlow(ctx, group, proxy.Now, []model.Sample{sample}, snapshot.Samples)
+	d.considerSlow(ctx, group, proxy.Now, []model.Sample{sample}, snapshot.Samples, gate)
 }
 
-func (d *daemonRuntime) considerSlow(ctx context.Context, group config.Group, current string, fresh, past []model.Sample) {
+func (d *daemonRuntime) considerSlow(ctx context.Context, group config.Group, current string, fresh, past []model.Sample, gate policy.LatencyGate) {
 	if !d.currentIs(group.Name, current) {
 		return
 	}
 	currentSample, ok := sampleFor(current, fresh)
 	if !ok {
-		d.runner.recordDecisionOutcome(ctx, group, current, "skipped", "当前节点没有可比较测速结果", fresh)
+		d.runner.recordDecisionOutcome(ctx, group, current, "skipped", "当前节点没有可比较测速结果", fresh, gate)
+		return
+	}
+	// A complete group round with no eligible measured member cannot justify a
+	// performance switch. Single-node quick checks still get a confirmation.
+	if currentSample.Kind == "sweep" && allBandwidthExcluded(gate, fresh) {
+		d.cancelPendingSlow(group.Name)
+		d.runner.recordDecisionOutcome(ctx, group, current, "kept", noLatencyCandidate, fresh, gate)
 		return
 	}
 	baseline := policy.Baseline(currentSample, past)
 	if !bandwidthDegraded(currentSample, baseline, group.MinMbps, d.runner.Cfg.Selection.SevereDropPct) {
 		d.cancelPendingSlow(group.Name)
-		d.runner.recordDecisionOutcome(ctx, group, current, "kept", "", fresh)
+		d.runner.recordDecisionOutcome(ctx, group, current, "kept", "", fresh, gate)
 		return
 	}
 	generation, started := d.startPendingSlow(group.Name)
@@ -349,11 +377,11 @@ func (d *daemonRuntime) considerSlow(ctx context.Context, group config.Group, cu
 	go func() {
 		defer d.wg.Done()
 		defer d.clearPendingSlow(group.Name, generation)
-		d.confirmSlow(ctx, group, currentSample, baseline, fresh, past, generation)
+		d.confirmSlow(ctx, group, currentSample, baseline, fresh, past, generation, gate)
 	}()
 }
 
-func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, initial model.Sample, baseline float64, initialFresh, past []model.Sample, generation uint64) {
+func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, initial model.Sample, baseline float64, initialFresh, past []model.Sample, generation uint64, gate policy.LatencyGate) {
 	current := initial.Node
 	required := d.runner.Cfg.Selection.SlowConfirmations
 	if required < 2 {
@@ -374,18 +402,18 @@ func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, ini
 		}
 		currentResult, err = d.measure(ctx, current, "confirm", d.runner.Cfg.Speed.ConfirmBytes)
 		if err != nil {
-			d.runner.recordDecisionOutcome(ctx, group, current, "failed", "复测未完成", append([]model.Sample{initial}, currentResult))
+			d.runner.recordDecisionOutcome(ctx, group, current, "failed", "复测未完成", []model.Sample{initial, currentResult}, gate)
 			return
 		}
 		if !policy.Comparable(initial, currentResult) || !bandwidthDegraded(currentResult, baseline, group.MinMbps, d.runner.Cfg.Selection.SevereDropPct) {
-			d.runner.recordDecisionOutcome(ctx, group, current, "kept", "复测未确认持续降速", append([]model.Sample{initial}, currentResult))
+			d.runner.recordDecisionOutcome(ctx, group, current, "kept", "复测未确认持续降速", []model.Sample{initial, currentResult}, gate)
 			return
 		}
 		confirmations++
 	}
 
 	if d.inCooldown(group.Name) {
-		d.runner.recordDecisionOutcome(ctx, group, current, "skipped", "处于切换冷静期", []model.Sample{currentResult})
+		d.runner.recordDecisionOutcome(ctx, group, current, "skipped", "处于切换冷静期", []model.Sample{currentResult}, gate)
 		return
 	}
 	if !d.pendingMatches(group.Name, current, generation) {
@@ -393,7 +421,7 @@ func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, ini
 	}
 	candidates, err := d.candidates(ctx, group.Name)
 	if err != nil {
-		d.runner.recordDecisionOutcome(ctx, group, current, "failed", "无法读取候选节点", []model.Sample{currentResult})
+		d.runner.recordDecisionOutcome(ctx, group, current, "failed", "无法读取候选节点", []model.Sample{currentResult}, gate)
 		return
 	}
 	seed := initialFresh
@@ -404,36 +432,53 @@ func (d *daemonRuntime) confirmSlow(ctx context.Context, group config.Group, ini
 			seed, _ = d.candidateHistory(ctx, candidates, past, time.Now().Add(-age))
 		}
 	}
-	shortlist := alternativeNodes(current, policy.Rank(current, seed, past, d.runner.Cfg.Selection.NearBestPct), 2)
-	shortlist = appendUnknownAlternatives(shortlist, current, candidates, 2)
-	if len(shortlist) == 0 {
-		d.runner.recordDecisionOutcome(ctx, group, current, "kept", "没有可复测的备选节点", []model.Sample{currentResult})
-		return
+	shortlist := alternativeNodes(current, policy.Rank(current, gate.Filter(seed), past, d.runner.Cfg.Selection.NearBestPct), 2)
+	if !sameSweep {
+		shortlist = appendUnknownAlternatives(shortlist, current, candidates, 2)
 	}
 	confirmed := []model.Sample{currentResult}
 	for _, node := range shortlist {
-		if result, ok := sampleFor(node, seed); sameSweep && ok {
+		if sameSweep {
+			result, _ := sampleFor(node, seed)
 			confirmed = append(confirmed, result)
 			continue
 		}
-		result, measureErr := d.measure(ctx, node, "confirm", d.runner.Cfg.Speed.ConfirmBytes)
-		if measureErr == nil {
+		if result, measureErr := d.measure(ctx, node, "confirm", d.runner.Cfg.Speed.ConfirmBytes); measureErr == nil {
 			confirmed = append(confirmed, result)
 		}
 	}
-	ranked := policy.Rank(current, confirmed, past, d.runner.Cfg.Selection.NearBestPct)
+	if sameSweep {
+		// Keep the measurements that explain why faster nodes missed the shortlist.
+		for _, result := range seed {
+			if result.Node != current && gate.Exclusion(result) != "" {
+				confirmed = append(confirmed, result)
+			}
+		}
+	}
+	if allBandwidthExcluded(gate, confirmed) {
+		d.runner.recordDecisionOutcome(ctx, group, current, "kept", noLatencyCandidate, confirmed, gate)
+		return
+	}
+	ranked := policy.Rank(current, gate.Filter(confirmed), past, d.runner.Cfg.Selection.NearBestPct)
 	forceReplacement := currentResult.Error != "" || currentResult.Mbps <= 0 || group.MinMbps > 0 && currentResult.Mbps < group.MinMbps
 	if forceReplacement {
 		ranked = withoutNode(ranked, current)
 	}
+	if gate.Exclusion(currentResult) != "" {
+		// Even when latency excludes the incumbent from ranking, a performance
+		// switch must improve on its measured bandwidth, including on fallback.
+		ranked = slices.DeleteFunc(ranked, func(candidate model.Sample) bool {
+			return candidate.Mbps <= currentResult.Mbps
+		})
+	}
 	if !hasBetterAlternative(current, currentResult.Mbps, ranked, group.MinMbps) {
-		d.runner.recordDecisionOutcome(ctx, group, current, "kept", "没有满足切换条件的更优候选", confirmed)
+		d.runner.recordDecisionOutcome(ctx, group, current, "kept", "没有满足切换条件的更优候选", confirmed, gate)
 		return
 	}
 	if !d.pendingMatches(group.Name, current, generation) {
 		return
 	}
-	selected, err := d.apply(ctx, group, current, ranked, confirmed, past, "")
+	selected, err := d.apply(ctx, group, current, ranked, confirmed, past, "slowConfirmation", gate)
 	if err != nil {
 		d.runner.logWarn("slow-path switch failed", "group", group.Name, "error", err)
 		return
@@ -603,12 +648,12 @@ func (d *daemonRuntime) candidates(ctx context.Context, group string) ([]string,
 	return d.runner.Candidates(ctx, group)
 }
 
-func (d *daemonRuntime) apply(ctx context.Context, group config.Group, expected string, ranked, evidence, past []model.Sample, decisionTrigger string) (string, error) {
+func (d *daemonRuntime) apply(ctx context.Context, group config.Group, expected string, ranked, evidence, past []model.Sample, decisionTrigger string, gate policy.LatencyGate) (string, error) {
 	if d.applyFn != nil {
 		return d.applyFn(ctx, group, expected, ranked)
 	}
 	results, err := d.runner.applySelections(ctx, BenchTarget{
-		Group: group, Current: expected, Evidence: evidence, History: past, DecisionTrigger: decisionTrigger,
+		Group: group, Current: expected, Evidence: evidence, History: past, DecisionTrigger: decisionTrigger, LatencyGate: gate,
 	}, ranked, false)
 	if len(results) == 0 {
 		return "", err

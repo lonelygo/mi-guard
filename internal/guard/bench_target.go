@@ -11,6 +11,7 @@ import (
 
 	"github.com/lonelygo/mi-guard/internal/config"
 	"github.com/lonelygo/mi-guard/internal/model"
+	"github.com/lonelygo/mi-guard/internal/policy"
 )
 
 // BenchTarget identifies the live group whose members are measured. A chain
@@ -27,6 +28,31 @@ type BenchTarget struct {
 	Evidence []model.Sample
 	// History is passed only for explaining an already computed policy ranking.
 	History []model.Sample
+	// LatencyGate is captured before the first measurement of this group.
+	LatencyGate policy.LatencyGate
+}
+
+func (r *Runner) GroupLatencyGate(group string) (policy.LatencyGate, error) {
+	if group == "" || group == r.Cfg.Mihomo.TestGroup {
+		return policy.LatencyGate{}, nil
+	}
+	gate := policy.LatencyGate{Factor: r.Cfg.Selection.LatencyOutlierFactor}
+	if gate.Factor == 0 || r.Store == nil {
+		return gate, nil
+	}
+	baseline, err := r.Store.LatencyBaseline(group, r.Cfg.LatencyProbeKey())
+	if err != nil {
+		return gate, fmt.Errorf("read group latency history for %s: %w", model.QuoteName(group), err)
+	}
+	gate.MeanMS, gate.Samples = baseline.MeanMS, baseline.Samples
+	return gate, nil
+}
+
+func (r *Runner) RecordGroupLatencies(ctx context.Context, group string, measured []model.Sample) error {
+	if group == "" || group == r.Cfg.Mihomo.TestGroup || r.Store == nil {
+		return nil
+	}
+	return r.Store.RecordLatencyRound(ctx, group, r.Cfg.LatencyProbeKey(), measured)
 }
 
 func (r *Runner) ResolveBenchTarget(ctx context.Context, query string) (BenchTarget, error) {

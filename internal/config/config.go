@@ -129,6 +129,9 @@ func (c Config) validate() error {
 		return errors.New("invalid schedule interval or heartbeat_failures")
 	}
 	p := c.Selection
+	if math.IsNaN(p.LatencyOutlierFactor) || math.IsInf(p.LatencyOutlierFactor, 0) || p.LatencyOutlierFactor != 0 && p.LatencyOutlierFactor < 1 {
+		return errors.New("selection.latency_outlier_factor must be 0 or a finite number of at least 1")
+	}
 	if !pct(p.SevereDropPct) || p.SevereDropPct == 0 || p.SevereDropPct == 100 || !pct(p.NearBestPct) || p.SlowConfirmations < 2 || p.MaxAge <= 0 {
 		return errors.New("invalid selection percentage, confirmations (minimum 2) or max_sample_age")
 	}
@@ -217,6 +220,13 @@ func (s Speed) BenchTotalBytes() (int64, error) {
 func (c Config) DownloadProfile(streams int, totalBytes int64) model.DownloadProfile {
 	settings := fmt.Sprintf("%s\x00%d\x00%s\x00%d", c.Speed.URL, c.Speed.Timeout, c.Speed.LivenessURL, c.Schedule.HeartbeatTimeout)
 	return model.DownloadProfile{Streams: streams, TotalBytes: totalBytes, Target: fmt.Sprintf("%x", sha256.Sum256([]byte(settings)))}
+}
+
+// LatencyProbeKey identifies the HTTP 204 probe without retaining its URL.
+// Download size, URL and stream count do not affect this latency history.
+func (c Config) LatencyProbeKey() string {
+	settings := fmt.Sprintf("%s\x00%d", c.Speed.LivenessURL, c.Schedule.HeartbeatTimeout)
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(settings)))
 }
 
 func pct(v float64) bool { return v >= 0 && v <= 100 }

@@ -41,7 +41,8 @@ func TestInitAndDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Selection.SevereDropPct != 20 || c.Selection.NearBestPct != 20 || c.Schedule.FullInterval != 12*time.Hour || c.Schedule.HeartbeatFailures != 2 || c.History.SamplesPerNode != 50 {
+	if c.Selection.SevereDropPct != 20 || c.Selection.NearBestPct != 20 || c.Selection.LatencyOutlierFactor != 1.5 ||
+		c.Schedule.FullInterval != 12*time.Hour || c.Schedule.HeartbeatFailures != 2 || c.History.SamplesPerNode != 50 {
 		t.Fatalf("unexpected defaults: %+v %+v", c.Selection, c.Schedule)
 	}
 	if c.History.File != filepath.Join(filepath.Dir(path), "speed-history.json") || !filepath.IsAbs(c.Mihomo.StableBinary) || c.Mihomo.AllowPrerelease {
@@ -94,6 +95,43 @@ func TestDownloadProfileTracksMeasurementSettings(t *testing.T) {
 		if other.DownloadProfile(4, 16<<20) == p {
 			t.Errorf("endpoint or timeout change kept stale profile: %+v", other)
 		}
+	}
+}
+
+func TestLatencyProbeKeyTracksOnlyThe204Probe(t *testing.T) {
+	cfg := Config{Speed: Speed{
+		URL: "https://download.test/data?token=secret", LivenessURL: "https://probe.test/204?token=private", Timeout: time.Second,
+	}, Schedule: Schedule{HeartbeatTimeout: 3 * time.Second}}
+	key := cfg.LatencyProbeKey()
+	if len(key) != 64 || strings.Contains(key, "private") {
+		t.Fatalf("invalid latency probe key %q", key)
+	}
+	other := cfg
+	other.Speed.URL += "2"
+	other.Speed.Timeout++
+	other.Speed.BenchStreams = 8
+	if other.LatencyProbeKey() != key {
+		t.Fatal("download-only settings split HTTP latency history")
+	}
+	other.Speed.LivenessURL += "2"
+	if other.LatencyProbeKey() == key {
+		t.Fatal("liveness URL change kept stale latency history")
+	}
+	other = cfg
+	other.Schedule.HeartbeatTimeout++
+	if other.LatencyProbeKey() == key {
+		t.Fatal("probe timeout change kept stale latency history")
+	}
+}
+
+func TestLatencyOutlierFactorCanBeDisabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "guard.yaml")
+	if err := os.WriteFile(path, []byte("selection: {latency_outlier_factor: 0}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadGuard(path)
+	if err != nil || c.Selection.LatencyOutlierFactor != 0 {
+		t.Fatalf("disabled latency factor = %v, err=%v", c.Selection.LatencyOutlierFactor, err)
 	}
 }
 
@@ -193,6 +231,7 @@ func TestLegacyGeneratedNotificationHelperExpandsForCompatibility(t *testing.T) 
 func TestInvalidGuardConfiguration(t *testing.T) {
 	for _, content := range []string{
 		"selection: {severe_drop_pct: 100}", "selection: {severe_drop_pct: 0}", "unknown_field: true",
+		"selection: {latency_outlier_factor: 0.99}", "selection: {latency_outlier_factor: -.inf}", "selection: {latency_outlier_factor: .nan}",
 		"mihomo: {controller: 'http://example.test:9090'}", "speedtest: {billing_day: 29}",
 		"speedtest: {bench_streams: 0}", "speedtest: {bench_streams: 9}", "speedtest: {streams_per_node: 0}",
 		"speedtest: {streams_per_node: 3, bench_streams: 0}", "speedtest: {bench_bytes_per_stream: 0}",

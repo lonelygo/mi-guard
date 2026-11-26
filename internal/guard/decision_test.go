@@ -86,3 +86,53 @@ func TestDecisionExplainsPolicyRankingWithoutInventingValidation(t *testing.T) {
 		t.Fatalf("validation was inferred without execution evidence: %+v", event)
 	}
 }
+
+func TestDecisionExplainsLatencyGateBeforeBandwidthRanking(t *testing.T) {
+	profile := model.DownloadProfile{Streams: 4, TotalBytes: 16 << 20, Target: strings.Repeat("a", 64)}
+	evidence := []model.Sample{
+		{Node: "fast-jitter", Provider: "p", Scope: "front", Kind: "bench", Mbps: 120, LatencyMS: 180, Attempts: 2, Profile: profile},
+		{Node: "stable", Provider: "p", Scope: "front", Kind: "bench", Mbps: 100, LatencyMS: 120, Attempts: 2, Profile: profile},
+		{Node: "unknown", Provider: "p", Scope: "front", Kind: "bench", Mbps: 110, Attempts: 1, Profile: profile},
+	}
+	gate := policy.LatencyGate{MeanMS: 100, Samples: 12, Factor: 1.5}
+	ranked := policy.Rank("stable", gate.Filter(evidence), nil, 20)
+	event := newDecision(BenchTarget{
+		Group: config.Group{Name: "group"}, Current: "stable", Evidence: evidence, LatencyGate: gate,
+	}, ranked, true, 20)
+
+	if event.LatencyMeanMS == nil || *event.LatencyMeanMS != 100 || event.LatencySamples != 12 ||
+		event.LatencyFactor != 1.5 || event.LatencyThresholdMS == nil || *event.LatencyThresholdMS != 150 {
+		t.Fatalf("latency gate = %+v", event)
+	}
+	if event.ThresholdMbps == nil || *event.ThresholdMbps != 80 {
+		t.Fatalf("bandwidth threshold included filtered candidates: %+v", event.ThresholdMbps)
+	}
+	if event.Candidates[0].Validation != policy.LatencyAboveLimit || event.Candidates[0].Rank != 0 ||
+		event.Candidates[1].Validation != "" || event.Candidates[1].Rank != 1 ||
+		event.Candidates[2].Validation != policy.LatencyUnknown || event.Candidates[2].Rank != 0 {
+		t.Fatalf("latency evidence = %+v", event.Candidates)
+	}
+	completeDecision(&event, []SelectionResult{{Group: "group", Before: "stable", After: "stable", Action: "kept"}}, nil)
+	if !event.Candidates[1].Selected || event.Candidates[0].Selected || event.Candidates[2].Selected {
+		t.Fatalf("selected latency evidence = %+v", event.Candidates)
+	}
+	excludedCurrent := newDecision(BenchTarget{
+		Group: config.Group{Name: "group"}, Current: "fast-jitter", Evidence: evidence, LatencyGate: gate,
+	}, ranked, true, 20)
+	completeDecision(&excludedCurrent, []SelectionResult{{Group: "group", Before: "fast-jitter", After: "fast-jitter", Action: "kept"}}, nil)
+	if excludedCurrent.Candidates[0].Selected {
+		t.Fatalf("excluded current was marked selected: %+v", excludedCurrent.Candidates[0])
+	}
+}
+
+func TestHardRecoveryDoesNotApplyLatencyGate(t *testing.T) {
+	sample := model.Sample{Node: "candidate", Kind: "recovery", Mbps: 20, LatencyMS: 900, Attempts: 2}
+	event := newDecision(BenchTarget{
+		Group: config.Group{Name: "group"}, Evidence: []model.Sample{sample},
+		LatencyGate: policy.LatencyGate{MeanMS: 100, Samples: 10, Factor: 1.5},
+	}, []model.Sample{sample}, false, 20)
+	if event.Trigger != "hardFailure" || event.LatencyFactor != 0 || event.LatencyMeanMS != nil ||
+		event.LatencyThresholdMS != nil || event.Candidates[0].Validation != "" {
+		t.Fatalf("hard recovery latency gate = %+v", event)
+	}
+}

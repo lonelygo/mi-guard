@@ -6,21 +6,25 @@ import "time"
 // intentionally self-contained so a notification can reopen the exact event
 // after the live controller state has changed.
 type Decision struct {
-	ID            string              `json:"id"`
-	At            time.Time           `json:"at"`
-	Source        string              `json:"source"`
-	Group         string              `json:"group"`
-	Chain         string              `json:"chain,omitempty"`
-	Before        string              `json:"before,omitempty"`
-	After         string              `json:"after,omitempty"`
-	Action        string              `json:"action"`
-	Reason        string              `json:"reason,omitempty"`
-	Trigger       string              `json:"trigger,omitempty"`
-	NearBestPct   float64             `json:"nearBestPct,omitempty"`
-	ThresholdMbps *float64            `json:"thresholdMbps,omitempty"`
-	MinMbps       float64             `json:"minMbps,omitempty"`
-	Candidates    []DecisionCandidate `json:"candidates,omitempty"`
-	Followers     []DecisionFollower  `json:"followers,omitempty"`
+	ID                 string              `json:"id"`
+	At                 time.Time           `json:"at"`
+	Source             string              `json:"source"`
+	Group              string              `json:"group"`
+	Chain              string              `json:"chain,omitempty"`
+	Before             string              `json:"before,omitempty"`
+	After              string              `json:"after,omitempty"`
+	Action             string              `json:"action"`
+	Reason             string              `json:"reason,omitempty"`
+	Trigger            string              `json:"trigger,omitempty"`
+	NearBestPct        float64             `json:"nearBestPct,omitempty"`
+	ThresholdMbps      *float64            `json:"thresholdMbps,omitempty"`
+	MinMbps            float64             `json:"minMbps,omitempty"`
+	LatencyMeanMS      *float64            `json:"latencyMeanMS,omitempty"`
+	LatencySamples     int                 `json:"latencySamples,omitempty"`
+	LatencyFactor      float64             `json:"latencyFactor,omitempty"`
+	LatencyThresholdMS *float64            `json:"latencyThresholdMS,omitempty"`
+	Candidates         []DecisionCandidate `json:"candidates,omitempty"`
+	Followers          []DecisionFollower  `json:"followers,omitempty"`
 }
 
 type DecisionCandidate struct {

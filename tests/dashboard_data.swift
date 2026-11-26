@@ -25,6 +25,7 @@ private enum DashboardDataTests {
           "decisions":[
             {"id":"decision-1","at":"2026-03-15T08:02:00Z","source":"manual","group":"primary","chain":"exit",
              "before":"a","after":"b","action":"switched","trigger":"manualBench","nearBestPct":20,"thresholdMbps":80,
+             "latencyMeanMS":120.5,"latencySamples":8,"latencyFactor":1.5,"latencyThresholdMS":180.75,
              "candidates":[{"node":"b","kind":"bench","observedAt":"2026-03-15T07:45:00Z",
                             "mbps":100,"latencyMS":30,"attempts":2,"failures":0,
                             "streams":4,"requestedBytes":16777216,"rank":1,"preferredBand":true,
@@ -53,6 +54,8 @@ private enum DashboardDataTests {
         precondition(archived.longestNode == "old" && archived.longestSeconds == 8.5)
         let decision = snapshot.decisionHistory[0]
         precondition(decision.id == "decision-1" && decision.evidence[0].selected == true && decision.evidence[0].streams == 4)
+        precondition(decision.latencyMeanMS == 120.5 && decision.latencySamples == 8 && decision.latencyFactor == 1.5)
+        precondition(decision.latencyThresholdMS == 180.75)
         precondition(decision.evidence[0].rank == 1 && decision.evidence[0].preferredBand == true && decision.evidence[0].historyP25Mbps == 88)
         precondition(decision.evidence[0].strategyAttempts == 8 && decision.evidence[0].historyAttempts == 6)
         precondition(decision.evidence[0].observedAt?.timeIntervalSince(decision.at) == -17 * 60)

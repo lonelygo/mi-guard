@@ -46,6 +46,10 @@ struct DecisionRecord: Decodable, Hashable, Identifiable, Sendable {
     let nearBestPct: Double?
     let thresholdMbps: Double?
     let minMbps: Double?
+    let latencyMeanMS: Double?
+    let latencySamples: Int?
+    let latencyFactor: Double?
+    let latencyThresholdMS: Double?
     let candidates: [DecisionCandidate]?
     let followers: [DecisionFollower]?
 

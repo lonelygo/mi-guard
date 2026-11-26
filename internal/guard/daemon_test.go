@@ -13,6 +13,7 @@ import (
 	"github.com/lonelygo/mi-guard/internal/history"
 	"github.com/lonelygo/mi-guard/internal/mihomo"
 	"github.com/lonelygo/mi-guard/internal/model"
+	"github.com/lonelygo/mi-guard/internal/policy"
 	"github.com/lonelygo/mi-guard/internal/probe"
 )
 
@@ -263,7 +264,7 @@ func TestSlowSchedulerBoundaryConfirmationAndVerifiedAlternative(t *testing.T) {
 	}
 
 	failedConfirmation := newRuntime([]model.Sample{daemonSample(runner, "a", "confirm", 81)})
-	failedConfirmation.considerSlow(context.Background(), group, "a", initial, past)
+	failedConfirmation.considerSlow(context.Background(), group, "a", initial, past, policy.LatencyGate{})
 	failedConfirmation.wg.Wait()
 	fixture.mu.Lock()
 	if len(fixture.writes) != 0 {
@@ -277,14 +278,14 @@ func TestSlowSchedulerBoundaryConfirmationAndVerifiedAlternative(t *testing.T) {
 	previous := daemonSample(runner, "a", "sweep", 100)
 	previous.Provider = changedProvider.Provider
 	replaced := newRuntime([]model.Sample{changedProvider})
-	replaced.considerSlow(context.Background(), group, "a", initial, append(past, previous))
+	replaced.considerSlow(context.Background(), group, "a", initial, append(past, previous), policy.LatencyGate{})
 	replaced.wg.Wait()
 
 	confirmed := newRuntime([]model.Sample{
 		daemonSample(runner, "a", "confirm", 79),
 		daemonSample(runner, "b", "confirm", 100),
 	})
-	confirmed.considerSlow(context.Background(), group, "a", initial, past)
+	confirmed.considerSlow(context.Background(), group, "a", initial, past, policy.LatencyGate{})
 	confirmed.wg.Wait()
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
@@ -325,7 +326,7 @@ func TestSlowSchedulerRemeasuresHistoricalAlternative(t *testing.T) {
 			return result, nil
 		},
 	}
-	runtime.considerSlow(context.Background(), group, "a", []model.Sample{daemonSample(runner, "a", "quick", 80)}, past)
+	runtime.considerSlow(context.Background(), group, "a", []model.Sample{daemonSample(runner, "a", "quick", 80)}, past, policy.LatencyGate{})
 	runtime.wg.Wait()
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
@@ -364,7 +365,7 @@ func TestRepeatedAttributedDownloadFailureCanRecoverWithoutBaseline(t *testing.T
 		},
 	}
 	initial := []model.Sample{failedDaemonSample(runner, "a", "quick", "zero payload")}
-	runtime.considerSlow(context.Background(), group, "a", initial, nil)
+	runtime.considerSlow(context.Background(), group, "a", initial, nil, policy.LatencyGate{})
 	runtime.wg.Wait()
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
@@ -388,7 +389,7 @@ func TestAttributedDownloadFailureStopsWhenConfirmationRecovers(t *testing.T) {
 		},
 	}
 	initial := []model.Sample{failedDaemonSample(runner, "a", "quick", "connection reset")}
-	runtime.considerSlow(context.Background(), group, "a", initial, nil)
+	runtime.considerSlow(context.Background(), group, "a", initial, nil, policy.LatencyGate{})
 	runtime.wg.Wait()
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
@@ -433,7 +434,7 @@ func TestBandwidthFailuresDoNotSwitchWhenEveryDownloadFails(t *testing.T) {
 		},
 	}
 	initial := []model.Sample{failedDaemonSample(runner, "a", "quick", "connection reset")}
-	runtime.considerSlow(context.Background(), group, "a", initial, nil)
+	runtime.considerSlow(context.Background(), group, "a", initial, nil, policy.LatencyGate{})
 	runtime.wg.Wait()
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
@@ -469,7 +470,7 @@ func TestMinimumBandwidthCanPrepareSwitchWithoutHistory(t *testing.T) {
 		},
 	}
 	initial := []model.Sample{daemonSample(runner, "a", "quick", 40)}
-	runtime.considerSlow(context.Background(), group, "a", initial, nil)
+	runtime.considerSlow(context.Background(), group, "a", initial, nil, policy.LatencyGate{})
 	runtime.wg.Wait()
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
@@ -498,11 +499,11 @@ func TestHealthyMeasurementCancelsPendingSlowRecheck(t *testing.T) {
 		cancel()
 		runtime.wg.Wait()
 	}()
-	runtime.considerSlow(ctx, group, "a", []model.Sample{daemonSample(runner, "a", "quick", 80)}, past)
+	runtime.considerSlow(ctx, group, "a", []model.Sample{daemonSample(runner, "a", "quick", 80)}, past, policy.LatencyGate{})
 	if !runtime.pendingMatches("warp", "a", 1) {
 		t.Fatal("quick result at the daemon drop boundary did not schedule confirmation")
 	}
-	runtime.considerSlow(ctx, group, "a", []model.Sample{daemonSample(runner, "a", "quick", 90)}, past)
+	runtime.considerSlow(ctx, group, "a", []model.Sample{daemonSample(runner, "a", "quick", 90)}, past, policy.LatencyGate{})
 	if runtime.pendingMatches("warp", "a", 1) {
 		t.Fatal("healthy quick result did not cancel the pending confirmation")
 	}

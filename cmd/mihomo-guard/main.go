@@ -422,6 +422,10 @@ func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benc
 		if err != nil {
 			return err
 		}
+		target.LatencyGate, err = r.GroupLatencyGate(name)
+		if err != nil {
+			return err
+		}
 		for _, n := range names {
 			if re.MatchString(n) && (len(o.nodes) == 0 || slices.Contains(o.nodes, n)) {
 				members[name] = append(members[name], n)
@@ -461,6 +465,26 @@ func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benc
 	if scanErr != nil {
 		return scanErr
 	}
+	var latencyErr error
+	for i := range targets {
+		target := &targets[i]
+		name := target.Group.Name
+		if name == r.Cfg.Mihomo.TestGroup {
+			continue
+		}
+		for _, sample := range results {
+			if slices.Contains(members[name], sample.Node) {
+				target.Evidence = append(target.Evidence, sample)
+			}
+		}
+		printLatencyGate(os.Stderr, name, target.LatencyGate, target.Evidence)
+		if err := r.RecordGroupLatencies(ctx, name, target.Evidence); err != nil {
+			latencyErr = errors.Join(latencyErr, fmt.Errorf("record latency round for %s: %w", model.QuoteName(name), err))
+		}
+	}
+	if latencyErr != nil {
+		return latencyErr
+	}
 	if o.apply {
 		followed := make(map[string]bool)
 		for _, target := range targets {
@@ -468,14 +492,7 @@ func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benc
 			if followed[name] {
 				continue
 			}
-			var measured []model.Sample
-			for _, s := range results {
-				if slices.Contains(members[name], s.Node) {
-					measured = append(measured, s)
-				}
-			}
-			ranked := policy.Rank(target.Current, measured, past.Samples, r.Cfg.Selection.NearBestPct)
-			target.Evidence = measured
+			ranked := policy.Rank(target.Current, target.LatencyGate.Filter(target.Evidence), past.Samples, r.Cfg.Selection.NearBestPct)
 			target.History = past.Samples
 			outcomes, err := r.ApplyBenchTarget(ctx, target, ranked)
 			for i, outcome := range outcomes {

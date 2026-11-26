@@ -58,3 +58,18 @@ type Sample struct {
 	Failures  int             `json:"probe_failures"`
 	Error     string          `json:"error,omitempty"`
 }
+
+// ProbeLatency returns a successful HTTP 204 latency from a bandwidth
+// measurement. A zero-millisecond response is distinguishable from the zero
+// value only after the download attempt increments Attempts.
+func (s Sample) ProbeLatency() (int, bool) {
+	switch s.Kind {
+	case "bench", "sweep", "quick", "confirm":
+	default:
+		return 0, false
+	}
+	if s.LatencyMS < 0 || (s.Attempts < 2 && (s.LatencyMS == 0 || s.Failures > 0)) {
+		return 0, false
+	}
+	return s.LatencyMS, true
+}

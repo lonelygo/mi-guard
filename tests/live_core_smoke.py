@@ -126,9 +126,13 @@ class ProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], name: str, delay: float):
+    def __init__(
+        self, address: tuple[str, int], name: str, delay: float, probe_delay: float = 0.0
+    ):
         self.proxy_name = name
         self.chunk_delay = delay
+        self.probe_delay = probe_delay
+        self.probe_port = 0
         super().__init__(address, ProxyHandler)
 
     def handle_error(self, _request: Any, _client_address: Any) -> None:
@@ -147,6 +151,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(http.HTTPStatus.BAD_GATEWAY)
             return
         with upstream:
+            if port == self.server.probe_port and self.server.probe_delay:  # type: ignore[attr-defined]
+                time.sleep(self.server.probe_delay)  # type: ignore[attr-defined]
             self.send_response(http.HTTPStatus.OK, "Connection Established")
             self.end_headers()
             relay(
@@ -170,6 +176,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         host = parsed.hostname or self.headers.get("Host", "").split(":", 1)[0]
         port = parsed.port or 80
         path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        if (
+            parsed.path == "/204"
+            and parsed.port == self.server.probe_port  # type: ignore[attr-defined]
+            and self.server.probe_delay  # type: ignore[attr-defined]
+        ):
+            time.sleep(self.server.probe_delay)  # type: ignore[attr-defined]
         headers = {
             key: value
             for key, value in self.headers.items()
@@ -597,8 +609,12 @@ def write_guard_config(
     bench_bytes_per_stream: int | None = SMOKE_SWEEP_BYTES,
     monthly_bytes: int = 134217728,
     heartbeat_interval: str = "30s",
+    heartbeat_timeout: str = "1s",
+    liveness_port: int | None = None,
+    latency_outlier_factor: float = 0,
 ) -> None:
     origin = f"http://127.0.0.1:{origin_port}"
+    liveness = f"http://127.0.0.1:{liveness_port or origin_port}"
     # Omitting the new keys reproduces the YAML written by older installations.
     bench_settings = "streams_per_node: 1" if bench_bytes_per_stream is None else (
         f"bench_streams: 1\n  bench_bytes_per_stream: {bench_bytes_per_stream}"
@@ -613,7 +629,7 @@ def write_guard_config(
   test_proxy: http://127.0.0.1:{listener_port}
 schedule:
   heartbeat_interval: {heartbeat_interval}
-  heartbeat_timeout: 1s
+  heartbeat_timeout: {heartbeat_timeout}
   heartbeat_failures: 2
   full_interval: 12h
   active_interval: 0s
@@ -622,7 +638,7 @@ schedule:
   geo_interval: 5m
 speedtest:
   url: {origin}/download
-  liveness_url: {origin}/204
+  liveness_url: {liveness}/204
   geo_url: {origin}/geo
   trace_url: {origin}/trace
   timeout: 2s
@@ -635,6 +651,7 @@ speedtest:
 selection:
   severe_drop_pct: 20
   near_best_pct: 20
+  latency_outlier_factor: {latency_outlier_factor}
   slow_confirmations: 2
   sync_direct_on_warp_switch: true
   follow_groups: {{Managed: Mirror}}
@@ -730,10 +747,143 @@ def check_daemon_sweep(guard: Path, config: Path, history: Path) -> str:
     return sweeps[0]["scope"]
 
 
+def check_latency_outlier_selection(
+    guard: Path,
+    config: Path,
+    controller_port: int,
+    secret: str,
+    proxy_servers: dict[str, ProxyServer],
+    liveness_port: int,
+) -> dict[str, Any]:
+    managed_before = selection(controller_port, secret, "Managed")
+    mirror_before = selection(controller_port, secret, "Mirror")
+    slow = proxy_servers["Node Slow"]
+    fast = proxy_servers["Node Fast"]
+    slow_delay, fast_delay = slow.probe_delay, fast.probe_delay
+    slow_probe_port, fast_probe_port = slow.probe_port, fast.probe_port
+    try:
+        select_proxy(controller_port, secret, "Managed", "Node Fast")
+        select_proxy(controller_port, secret, "Mirror", "Node Fast")
+
+        slow.probe_delay = 0.3
+        fast.probe_delay = 0.3
+        slow.probe_port = liveness_port
+        fast.probe_port = liveness_port
+        trained = run_guard(
+            guard,
+            "bench",
+            "-c",
+            str(config),
+            "--group",
+            "Managed",
+            "--filter",
+            "^Node (Slow|Fast)$",
+            "--bytes",
+            "65536",
+        )
+        assert_names(trained, "冷启动", "本轮不剔除", "Node Slow", "Node Fast")
+        if selection(controller_port, secret, "Managed") != "Node Fast":
+            raise AssertionError("non-apply latency training changed Managed")
+
+        # Node Fast still has the higher bandwidth, but its current 204 delay is
+        # well above the historical group threshold and must be removed first.
+        fast.probe_delay = 0.9
+        applied = run_guard(
+            guard,
+            "bench",
+            "-c",
+            str(config),
+            "--group",
+            "Managed",
+            "--filter",
+            "^Node (Slow|Fast)$",
+            "--bytes",
+            "65536",
+            "--apply",
+        )
+        assert_names(applied, "剔除 Node Fast", "切换 Managed", "Node Fast → Node Slow")
+        if selection(controller_port, secret, "Managed") != "Node Slow":
+            raise AssertionError(f"latency gate did not reject the faster candidate:\n{applied}")
+        if selection(controller_port, secret, "Mirror") != "Node Slow":
+            raise AssertionError("latency-filtered primary was not mirrored")
+
+        snapshot = json.loads(run_guard(guard, "history", "-c", str(config)))
+        switched = next(
+            decision
+            for decision in snapshot["decisions"]
+            if decision["group"] == "Managed" and decision["action"] == "switched"
+        )
+        evidence = {candidate["node"]: candidate for candidate in switched["candidates"]}
+        threshold = switched.get("latencyThresholdMS")
+        bandwidth_threshold = switched.get("thresholdMbps")
+        if (
+            switched.get("latencyFactor") != 1.5
+            or switched.get("latencySamples") != 2
+            or not isinstance(threshold, (int, float))
+            or not 400 <= threshold <= 550
+            or evidence["Node Fast"].get("validation") != "latencyAboveLimit"
+            or evidence["Node Fast"].get("rank", 0) != 0
+            or evidence["Node Fast"]["mbps"] <= evidence["Node Slow"]["mbps"]
+            or evidence["Node Slow"].get("selected") is not True
+            or not isinstance(bandwidth_threshold, (int, float))
+            or abs(bandwidth_threshold - evidence["Node Slow"]["mbps"] * 0.8) > 1e-6
+        ):
+            raise AssertionError(f"latency-filtered decision evidence is incomplete: {switched}")
+
+        # The gate used by this round is captured before recording it. After the
+        # mixed round, 900 ms remains above the updated threshold for both nodes.
+        slow.probe_delay = 0.9
+        kept = run_guard(
+            guard,
+            "bench",
+            "-c",
+            str(config),
+            "--group",
+            "Managed",
+            "--filter",
+            "^Node (Slow|Fast)$",
+            "--bytes",
+            "65536",
+            "--apply",
+        )
+        assert_names(
+            kept,
+            "剔除 Node Slow",
+            "剔除 Node Fast",
+            "保持 Managed",
+            "延迟筛选后没有合格候选",
+        )
+        if selection(controller_port, secret, "Managed") != "Node Slow":
+            raise AssertionError(f"all-outlier round changed the current member:\n{kept}")
+        snapshot = json.loads(run_guard(guard, "history", "-c", str(config)))
+        all_outliers = next(
+            decision
+            for decision in snapshot["decisions"]
+            if decision["group"] == "Managed"
+            and decision["action"] == "kept"
+            and decision.get("reason") == "延迟筛选后没有合格候选，保留当前节点"
+        )
+        if all_outliers.get("thresholdMbps") is not None or {
+            candidate.get("validation") for candidate in all_outliers["candidates"]
+        } != {"latencyAboveLimit"}:
+            raise AssertionError(f"all-outlier decision evidence is incomplete: {all_outliers}")
+        return {
+            "latency_threshold_ms": threshold,
+            "bandwidth_threshold_mbps": bandwidth_threshold,
+            "selected": switched["after"],
+        }
+    finally:
+        slow.probe_delay, fast.probe_delay = slow_delay, fast_delay
+        slow.probe_port, fast.probe_port = slow_probe_port, fast_probe_port
+        select_proxy(controller_port, secret, "Managed", managed_before)
+        select_proxy(controller_port, secret, "Mirror", mirror_before)
+
+
 def exercise(core: Path, guard: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="mi-guard-live-core-") as temp:
         scratch = Path(temp)
         origin = QuietThreadingHTTPServer(("127.0.0.1", 0), ProbeHandler)
+        latency_origin = QuietThreadingHTTPServer(("127.0.0.1", 0), ProbeHandler)
         proxy_servers = {
             "Node Slow": ProxyServer(("127.0.0.1", 0), "Node Slow", 0.004),
             "Node Fast": ProxyServer(("127.0.0.1", 0), "Node Fast", 0.0),
@@ -742,7 +892,7 @@ def exercise(core: Path, guard: Path) -> None:
             "TW Fast": ProxyServer(("127.0.0.1", 0), "TW Fast", 0.0),
             "Exit Proxy": ProxyServer(("127.0.0.1", 0), "Exit Proxy", 0.0),
         }
-        servers: list[socketserver.BaseServer] = [origin, *proxy_servers.values()]
+        servers: list[socketserver.BaseServer] = [origin, latency_origin, *proxy_servers.values()]
         threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in servers]
         for thread in threads:
             thread.start()
@@ -830,6 +980,21 @@ def exercise(core: Path, guard: Path) -> None:
                 origin.server_address[1],
                 quick_history,
                 bench_bytes_per_stream=1048576,
+            )
+            latency_guard_config = scratch / "latency-mihomo-guard.yaml"
+            latency_history = scratch / "latency-history.json"
+            write_guard_config(
+                latency_guard_config,
+                core,
+                core_config,
+                controller_port,
+                listener_port,
+                secret,
+                origin.server_address[1],
+                latency_history,
+                heartbeat_timeout="2s",
+                liveness_port=latency_origin.server_address[1],
+                latency_outlier_factor=1.5,
             )
             stream_guard_config = scratch / "stream-mihomo-guard.yaml"
             stream_history = scratch / "stream-history.json"
@@ -1021,6 +1186,15 @@ def exercise(core: Path, guard: Path) -> None:
                         "Manual",
                     )
                     assert_names(source, "Node Manual")
+
+                    latency_selection = check_latency_outlier_selection(
+                        guard,
+                        latency_guard_config,
+                        controller_port,
+                        secret,
+                        proxy_servers,
+                        latency_origin.server_address[1],
+                    )
 
                     applied = run_guard(
                         guard,
@@ -1272,6 +1446,7 @@ def exercise(core: Path, guard: Path) -> None:
                                 "default_bench_bytes": default_state["used_bytes"],
                                 "recovered": recovered,
                                 "selector_recovered": selector_recovered,
+                                "latency_selection": latency_selection,
                                 "sample_count": len(samples),
                                 "proxy_requests": STATS.snapshot(),
                             },

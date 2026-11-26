@@ -47,7 +47,8 @@ speedtest:
 
 selection:
   severe_drop_pct: 20         # 降速确认门槛（大于 0、小于 100）。默认当前速度降至历史正常中位数的 80% 即复测。
-  near_best_pct: 20           # 与本轮最快节点的容差（0 到 100）。默认达到本轮最快速度的 80% 即进入同一优先档。
+  near_best_pct: 20           # 通过延迟筛选的节点中，达到最快带宽的 80% 即进入优先档。容差范围 0 到 100。
+  latency_outlier_factor: 1.5 # 先排除高于本组历史 HTTP 延迟均值 1.5 倍的候选，再按带宽选优。0 关闭，非零值至少为 1。
   slow_confirmations: 2       # 至少 2 次，包含初次观察到的降速。
   sync_direct_on_warp_switch: true # 前置实际切换成功后，尝试让对应的手动组选择同一节点。
   follow_groups: {}           # 键为前置组全名，值为等价普通组全名；同一前置的映射优先于旧的 groups[].direct。

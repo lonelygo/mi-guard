@@ -53,6 +53,18 @@ func newDecision(target BenchTarget, ranked []model.Sample, bench bool, nearBest
 		NearBestPct: nearBestPct,
 		MinMbps:     target.Group.MinMbps,
 	}
+	if trigger != "hardFailure" && target.LatencyGate.Factor > 0 {
+		event.LatencyFactor = target.LatencyGate.Factor
+		event.LatencySamples = target.LatencyGate.Samples
+		if target.LatencyGate.Samples > 0 && target.LatencyGate.MeanMS >= 0 &&
+			!math.IsNaN(target.LatencyGate.MeanMS) && !math.IsInf(target.LatencyGate.MeanMS, 0) {
+			mean := target.LatencyGate.MeanMS
+			event.LatencyMeanMS = &mean
+		}
+		if threshold, known := target.LatencyGate.Threshold(); known {
+			event.LatencyThresholdMS = &threshold
+		}
+	}
 	if bench {
 		event.Source = "manual"
 	}
@@ -82,14 +94,19 @@ func newDecision(target BenchTarget, ranked []model.Sample, bench bool, nearBest
 			Stage:          stage,
 			Status:         status,
 		}
+		if trigger != "hardFailure" {
+			candidate.Validation = target.LatencyGate.Exclusion(sample)
+		}
 		if !sample.At.IsZero() {
 			observedAt := sample.At.UTC()
 			candidate.ObservedAt = &observedAt
 		}
 		event.Candidates = append(event.Candidates, candidate)
 	}
-	if threshold, known := policy.PreferredThreshold(evidence, nearBestPct); trigger != "hardFailure" && len(ranked) > 0 && known {
-		event.ThresholdMbps = &threshold
+	if trigger != "hardFailure" && len(ranked) > 0 {
+		if threshold, known := policy.PreferredThreshold(target.LatencyGate.Filter(evidence), nearBestPct); known {
+			event.ThresholdMbps = &threshold
+		}
 	}
 	annotateDecisionRanking(&event, evidence, ranked, target.History)
 	return event
@@ -323,7 +340,7 @@ func selectedDecisionCandidate(candidates []history.DecisionCandidate, node, act
 		return best
 	}
 	for index, candidate := range candidates {
-		if candidate.Node == node {
+		if candidate.Node == node && candidate.Validation != "latencyAboveLimit" && candidate.Validation != "latencyUnknown" {
 			return index
 		}
 	}
@@ -348,6 +365,7 @@ func safeDecisionReason(action, reason string) string {
 		"Google 地区校验未通过", "出口地区不符，按宽松策略", "地区探测失败，按宽松策略", "地区结果未确认，按宽松策略",
 		"跟随目标是测速专用组", "跟随组已被其他操作修改", "跟随组当前选择指向测速专用组",
 		"跟随组没有同名的直接成员", "跟随组已选中同一节点",
+		"延迟筛选后",
 	}
 	for _, prefix := range safePrefixes {
 		if strings.HasPrefix(reason, prefix) {
@@ -385,11 +403,13 @@ func recordDecision(ctx context.Context, store *history.Store, event history.Dec
 	return store.RecordDecision(recordContext, event)
 }
 
-func (r *Runner) recordDecisionOutcome(ctx context.Context, group config.Group, current, action, reason string, evidence []model.Sample) {
-	event := newDecision(BenchTarget{Group: group, Current: current, Evidence: evidence}, nil, false, r.Cfg.Selection.NearBestPct)
+func (r *Runner) recordDecisionOutcome(ctx context.Context, group config.Group, current, action, reason string, evidence []model.Sample, gate policy.LatencyGate) {
+	event := newDecision(BenchTarget{Group: group, Current: current, Evidence: evidence, LatencyGate: gate}, nil, false, r.Cfg.Selection.NearBestPct)
 	event.After, event.Action, event.Reason = safeDecisionLabel(current), action, reason
 	for index := range event.Candidates {
-		event.Candidates[index].Selected = action == "kept" && event.Candidates[index].Node == event.After
+		candidate := &event.Candidates[index]
+		candidate.Selected = action == "kept" && candidate.Node == event.After &&
+			candidate.Validation != policy.LatencyAboveLimit && candidate.Validation != policy.LatencyUnknown
 	}
 	if err := recordDecision(ctx, r.Store, event); err != nil {
 		r.logWarn("record selection decision failed", "group", group.Name, "action", action, "error", err)

@@ -322,7 +322,7 @@ func contains(values []string, wanted string) bool {
 	return false
 }
 
-func (r *Runner) notifySwitch(group config.Group, oldNode string, result model.Sample, detail, eventID string) {
+func (r *Runner) notifySwitch(group config.Group, oldNode string, result model.Sample, detail, eventID, trigger string) {
 	if r.Notify == nil || !r.Cfg.Notifications.Enabled || !r.Cfg.Notifications.Switch {
 		if r.NotifyEvent == nil || !r.Cfg.Notifications.Enabled || !r.Cfg.Notifications.Switch {
 			return
@@ -331,14 +331,15 @@ func (r *Runner) notifySwitch(group config.Group, oldNode string, result model.S
 	if r.NotifyEvent == nil && r.Notify == nil {
 		return
 	}
-	reason := "链路故障恢复"
-	if result.Kind == "confirm" {
+	reason := "测速选择"
+	switch trigger {
+	case "slowConfirmation":
 		reason = "持续降速确认"
-	} else if result.Kind == "bench" || result.Kind == "sweep" {
-		reason = "测速选择"
+	case "hardFailure":
+		reason = "链路故障恢复"
 	}
 	body := fmt.Sprintf("%s：%s → %s，%s 验证通过", reason, oldNode, result.Node, group.ProbeTarget())
-	if result.Mbps > 0 && result.Kind != "recovery" {
+	if result.Mbps > 0 && trigger != "hardFailure" {
 		body += fmt.Sprintf("，实测 %.1f Mbps", result.Mbps)
 	}
 	if detail != "" {

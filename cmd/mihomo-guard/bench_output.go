@@ -14,6 +14,7 @@ import (
 
 	"github.com/lonelygo/mi-guard/internal/guard"
 	"github.com/lonelygo/mi-guard/internal/model"
+	"github.com/lonelygo/mi-guard/internal/policy"
 )
 
 const bytesPerMiB = 1 << 20
@@ -73,6 +74,47 @@ func printResults(out io.Writer, in []model.Sample) {
 			name += "  · " + displayText(s.Error)
 		}
 		fmt.Fprintf(out, row, mbps, mib, latency, fmt.Sprintf("%d/%d", s.Failures, s.Attempts), byteCount(s.Bytes), displayText(s.ProxyType), name)
+	}
+}
+
+func printLatencyGate(out io.Writer, group string, gate policy.LatencyGate, samples []model.Sample) {
+	label := "延迟筛选 " + displayText(group)
+	if gate.Factor == 0 {
+		fmt.Fprintf(out, "%s · 已关闭\n", label)
+		return
+	}
+	threshold, enabled := gate.Threshold()
+	if !enabled {
+		if gate.Samples > 0 {
+			fmt.Fprintf(out, "%s · 历史均值 %.1f ms，比例门槛不可用，本轮不剔除\n", label, gate.MeanMS)
+		} else {
+			fmt.Fprintf(out, "%s · 冷启动，尚无本组历史延迟，本轮不剔除\n", label)
+		}
+		return
+	}
+	fmt.Fprintf(out, "%s · 历史均值 %.1f ms · %d 次有效探测 · %.2f 倍阈值 %.1f ms\n",
+		label, gate.MeanMS, gate.Samples, gate.Factor, threshold)
+	excluded, measured := 0, 0
+	for _, sample := range samples {
+		if !policy.HasBandwidth(sample) {
+			continue
+		}
+		measured++
+		reason := gate.Exclusion(sample)
+		if reason == "" {
+			continue
+		}
+		excluded++
+		if latency, ok := sample.ProbeLatency(); ok {
+			fmt.Fprintf(out, "  剔除 %s · %d ms\n", displayText(sample.Node), latency)
+		} else {
+			fmt.Fprintf(out, "  剔除 %s · 本轮 HTTP 延迟缺失\n", displayText(sample.Node))
+		}
+	}
+	if measured == 0 {
+		fmt.Fprintln(out, "  本轮没有测速成功的候选")
+	} else if excluded == 0 {
+		fmt.Fprintf(out, "  %d 个测速成功的候选通过延迟筛选\n", measured)
 	}
 }
 
