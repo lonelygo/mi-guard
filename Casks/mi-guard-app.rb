@@ -1,7 +1,7 @@
 cask "mi-guard-app" do
   # BEGIN HOMEBREW_STABLE_METADATA
-  version "0.2.0"
-  sha256 "e08b0405f6eeee9954a0848d6077aaf721e2d45a0bdebb637bf56cf006d2906d"
+  version "0.2.1"
+  sha256 "348c4a01bdeac521426b7d7529ae127bcf126645fccf8d6e6de2d16c53ce0dff"
   # END HOMEBREW_STABLE_METADATA
 
   url "https://github.com/lonelygo/mi-guard/releases/download/v#{version}/mi-guard-app-#{version}-darwin-arm64.zip"
