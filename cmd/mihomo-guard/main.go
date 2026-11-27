@@ -130,7 +130,7 @@ func cleanInterrupt(err error) bool {
 	if cause := errors.Unwrap(err); cause != nil {
 		return cleanInterrupt(cause)
 	}
-	return err == context.Canceled
+	return errors.Is(err, context.Canceled)
 }
 
 func run(ctx context.Context, args []string) error {
@@ -213,8 +213,10 @@ func run(ctx context.Context, args []string) error {
 	if cmd == "notify-setup" {
 		return notify.Authorize(ctx, c.Notifications.Helper)
 	}
+	var progress *benchProgress
 	if cmd == "bench" {
-		fmt.Fprintln(os.Stderr, "正在读取测速候选…")
+		progress = newBenchProgress(os.Stderr, sharedBenchTerminal(os.Stdout, os.Stderr))
+		defer progress.close()
 	}
 	if len(opt.sources) > 0 {
 		if opt.apply || opt.group != "" {
@@ -276,7 +278,7 @@ func run(ctx context.Context, args []string) error {
 			return err
 		})
 	case "bench":
-		return bench(ctx, r, f, opt)
+		return bench(ctx, r, f, opt, progress)
 	}
 	return nil
 }
@@ -369,7 +371,7 @@ func checkManagedGroup(ctx context.Context, r *guard.Runner, g config.Group) ([]
 	return r.Candidates(ctx, g.Name)
 }
 
-func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benchOptions) error {
+func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benchOptions, progress *benchProgress) error {
 	re, err := regexp.Compile(o.filter)
 	if err != nil {
 		return fmt.Errorf("--filter: %w", err)
@@ -394,6 +396,7 @@ func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benc
 	var targets []guard.BenchTarget
 	members := make(map[string][]string)
 	var nodes []string
+	var groupLabels []string
 	for _, query := range queries {
 		target, err := r.ResolveBenchTarget(ctx, query)
 		if err != nil {
@@ -413,10 +416,13 @@ func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benc
 				}
 			}
 		}
+		label := fmt.Sprintf("测速组 %s (%s)", displayText(name), displayText(target.Type))
 		if target.Group.Chain != "" {
-			fmt.Fprintf(os.Stderr, "%s → 前置组 %s\n", displayText(target.Group.Chain), displayText(name))
-		} else if o.group != "" {
-			fmt.Fprintf(os.Stderr, "测速组 %s (%s)\n", displayText(name), displayText(target.Type))
+			label = fmt.Sprintf("%s → 前置组 %s", displayText(target.Group.Chain), displayText(name))
+		}
+		groupLabels = append(groupLabels, label)
+		if progress.stop == nil && (target.Group.Chain != "" || o.group != "") {
+			fmt.Fprintln(progress.out, label)
 		}
 		names, err := r.BenchCandidates(ctx, target, o.apply)
 		if err != nil {
@@ -453,15 +459,10 @@ func bench(ctx context.Context, r *guard.Runner, wiring *config.CoreFile, o benc
 	if err != nil {
 		return err
 	}
-	capacity := fmt.Sprintf("每节点共 %s，按流均分", byteCount(o.bytes))
-	if o.bytesPerStream > 0 {
-		capacity = fmt.Sprintf("每流上限 %s，每节点共 %s", byteCount(o.bytesPerStream), byteCount(o.bytes))
-	}
-	fmt.Fprintf(os.Stderr, "下载目标 %s · 每节点 %d 流 · %s · 超时 %s\n", displayText(endpoint.Host), r.Cfg.Speed.BenchStreams, capacity, r.Cfg.Speed.Timeout)
-	progress := newBenchProgress(os.Stderr, stderrColumns())
+	progress.describe(strings.Join(groupLabels, " · "), displayText(endpoint.Host), r.Cfg.Speed.BenchStreams, o, r.Cfg.Speed.Timeout)
 	results, scanErr := r.ScanWithProgress(ctx, nodes, "bench", o.bytes, progress.update)
 	progress.close()
-	printResults(os.Stdout, results)
+	progress.printFinal(os.Stdout, results, scanErr)
 	if scanErr != nil {
 		return scanErr
 	}

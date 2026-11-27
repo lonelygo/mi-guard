@@ -2,9 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
-	"unicode/utf8"
+	"time"
 
 	"github.com/lonelygo/mi-guard/internal/guard"
 	"github.com/lonelygo/mi-guard/internal/model"
@@ -28,29 +29,43 @@ func TestBenchOutputShowsComparableUnitsAndMissingMeasurements(t *testing.T) {
 	}
 }
 
-func TestLiveBenchClipsActiveLineAndPrintsFullFinishedNode(t *testing.T) {
-	var output bytes.Buffer
-	const columns = 60
-	p := newBenchProgress(&output, columns)
-	node := strings.Repeat("🇺🇸 示例", 18)
-	p.update(guard.ScanProgress{Node: node, Total: 1})
-	p.mu.Lock()
-	first := strings.TrimPrefix(output.String(), "\r\x1b[2K")
-	p.mu.Unlock()
-	if !utf8.ValidString(first) || len(first) >= columns || !strings.HasSuffix(first, "...") {
-		t.Errorf("invalid transient progress line at %d columns: %q", columns, first)
+func TestBenchRendersLiveRankingAndLeavesOneFinalTable(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	var live, final bytes.Buffer
+	p := newBenchProgress(&live, benchSize{60, 12})
+	defer p.close()
+	p.describe("测速组 🇺🇲 美国节点", "speed.example", 4, benchOptions{bytes: 16 << 20, bytesPerStream: 4 << 20}, 8*time.Second)
+	long := strings.Repeat("🇺🇸 示例", 18)
+	slow := model.Sample{Kind: "bench", Node: long, Mbps: 12, LatencyMS: 425, Attempts: 2}
+	fast := model.Sample{Kind: "bench", Node: "🇺🇸 美国-US2", Mbps: 60, LatencyMS: 184, Attempts: 2}
+	for i, sample := range []model.Sample{slow, fast} {
+		p.update(guard.ScanProgress{Node: sample.Node, Completed: i, Total: 2})
+		p.update(guard.ScanProgress{Node: sample.Node, Completed: i + 1, Total: 2, Result: &sample})
 	}
-	s := model.Sample{Node: node, Mbps: 8}
-	p.update(guard.ScanProgress{Node: node, Total: 1, Completed: 1, Result: &s})
 	p.close()
-	if !strings.Contains(output.String(), node) {
-		t.Fatal("full node name missing from settled result")
+	raw := live.String()
+	if strings.Count(raw, "\x1b[?1049h") != 1 || strings.Count(raw, "\x1b[?1049l") != 1 ||
+		!strings.Contains(raw, "正在测速") || strings.Contains(raw, long) || !strings.Contains(raw, "…") {
+		t.Fatalf("invalid live screen lifecycle or truncation: %q", raw)
+	}
+	frame := p.frame(time.Second)
+	if !strings.Contains(frame[len(frame)-2], fast.Node) || !strings.Contains(frame[len(frame)-1], "425 ms") {
+		t.Fatalf("live ranking: %q", frame)
+	}
+	p.printFinal(&final, []model.Sample{slow, fast}, nil)
+	for _, want := range []string{"4 流 × 4 MiB · 16 MiB/节点", "已完成 2/2", "节点名称", long, fast.Node} {
+		if strings.Count(final.String(), want) != 1 {
+			t.Errorf("expected %q once in transcript: %s", want, final.String())
+		}
+	}
+	if strings.Contains(final.String(), "\x1b") || strings.Contains(final.String(), "正在读取") {
+		t.Fatal("NO_COLOR transcript contains styling or a stale loading line")
 	}
 }
 
 func TestBenchProgressVisibleBeforeFirstResultAndPlainInPipe(t *testing.T) {
 	var output bytes.Buffer
-	p := newBenchProgress(&output, 0)
+	p := newBenchProgress(&output, benchSize{})
 	p.update(guard.ScanProgress{Node: "示例", Total: 1})
 	for _, want := range []string{"0/1", "测速中 示例"} {
 		if !strings.Contains(output.String(), want) {
@@ -67,6 +82,36 @@ func TestBenchProgressVisibleBeforeFirstResultAndPlainInPipe(t *testing.T) {
 	}
 	if strings.ContainsAny(output.String(), "\r\x1b") {
 		t.Fatalf("terminal escapes in pipe: %q", output.String())
+	}
+}
+
+func TestBenchViewportAndPartialResults(t *testing.T) {
+	p := &benchProgress{
+		heading: []string{"测速组", "下载目标"}, start: time.Now(),
+		last: guard.ScanProgress{Completed: 20, Total: 22, Node: "正在测量的节点"},
+	}
+	for i := 0; i < 20; i++ {
+		p.ranked = append(p.ranked, model.Sample{Kind: "bench", Node: "美国-US2", Mbps: 60})
+	}
+	for _, size := range []benchSize{{18, 2}, {40, 6}, {80, 12}, {144, 30}} {
+		p.size = size
+		frame := p.frame(35 * time.Second)
+		if len(frame) > size.rows {
+			t.Fatalf("frame has %d rows for %v", len(frame), size)
+		}
+		for _, line := range frame {
+			if cellWidth(line) >= size.columns {
+				t.Errorf("live line wraps in %v: %q", size, line)
+			}
+		}
+		if size.rows == 12 && !strings.Contains(frame[len(frame)-1], "另有") {
+			t.Errorf("hidden results missing from %q", frame)
+		}
+	}
+	var out bytes.Buffer
+	p.printFinal(&out, p.ranked, context.Canceled)
+	if !strings.Contains(out.String(), "已停止 20/22") || strings.Contains(out.String(), "剩余") || strings.Count(out.String(), "美国-US2") != 20 {
+		t.Fatalf("partial transcript missing stopped status or results: %s", out.String())
 	}
 }
 

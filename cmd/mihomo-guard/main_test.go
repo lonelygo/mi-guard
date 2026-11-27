@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -82,7 +83,16 @@ func TestBenchRejectsConflictingAndInvalidCapsBeforeStartingCore(t *testing.T) {
 	}
 }
 
+// A signal.NotifyContext cause can match context.Canceled through Is
+// without exposing it through Unwrap. HTTP requests can return that cause.
+type interruptCause struct{ error }
+
+func (interruptCause) Is(target error) bool { return target == context.Canceled }
+
 func TestInterruptReportsFailedRestoration(t *testing.T) {
+	if !cleanInterrupt(fmt.Errorf("204 probe: %w", interruptCause{errors.New("interrupt signal received")})) {
+		t.Fatal("an interrupted HTTP probe should exit cleanly")
+	}
 	cancelled := fmt.Errorf("measurement: %w", context.Canceled)
 	if !cleanInterrupt(errors.Join(cancelled, context.Canceled)) {
 		t.Fatal("plain cancellation should exit cleanly")
@@ -96,7 +106,7 @@ func TestImplicitManagedGroupIsNeverFuzzyApplied(t *testing.T) {
 	fixture, server := newCommandController(t)
 	r := commandRunner(t, server)
 	r.Cfg.Groups[0].Name = "war" // only "warp" exists in the controller
-	err := bench(context.Background(), r, &config.CoreFile{}, benchOptions{apply: true})
+	err := bench(context.Background(), r, &config.CoreFile{}, benchOptions{apply: true}, newBenchProgress(io.Discard, benchSize{}))
 	if err == nil || !strings.Contains(err.Error(), "exact name") || len(fixture.writes) != 0 || len(fixture.delays) != 0 {
 		t.Fatalf("implicit fuzzy group: err=%v writes=%v probes=%v", err, fixture.writes, fixture.delays)
 	}
